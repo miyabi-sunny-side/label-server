@@ -1,28 +1,24 @@
 # label-server
 
-Type text into a textarea, press 印刷, and a Brother PT-P700 prints the label. One Rust process
-serves both the JSON API and the compiled Svelte page; printing itself is delegated to
-[ptouch-print](https://codeberg.org/askaaron/ptouch-print), which talks to the printer over USB
-without CUPS.
+Type text into a textarea, press 印刷, and a Brother PT-P700 prints the label. One Rust binary
+serves the JSON API and the compiled Svelte page, renders the text, and talks to the printer over
+USB itself (libusb is linked statically) — no CUPS, no driver, no external tool.
+
+The USB protocol and the text layout rules are a Rust port of
+[ptouch-print](https://codeberg.org/askaaron/ptouch-print) by Dominic Radermacher, which is why
+this project is licensed under the GPLv3 (see [License](#license)).
 
 ## Prerequisites
 
 - Rust 1.96.0 (the checked-in toolchain file selects it automatically through `rustup`)
 - Node.js 24 LTS and npm
-- `ptouch-print` on `PATH` (build it from the link above; it needs `cmake`, `gettext`, `libusb-1.0`
-  and `libgd`)
-- The fontconfig font `Noto Sans CJK JP` (the server passes this name to `ptouch-print`)
+- A TrueType / OpenType font with the glyphs you print. Noto Sans CJK is picked up automatically
+  from its usual Linux locations, Hiragino Sans on macOS; anything else goes in `LABEL_FONT`
 - A PT-P700 connected over USB with **Editor Lite turned off** — hold the Editor Lite button for
   about two seconds until its lamp goes out. While the lamp is on, the printer shows up as a USB
   disk (`04f9:2064`) instead of a printer (`04f9:2061`) and nothing can print.
-- Permission to open the USB device (membership in the `lp` group is enough on most distributions;
-  ptouch-print also ships udev rules)
-
-Check the printer before starting the server:
-
-```sh
-ptouch-print --info
-```
+- Permission to open the USB device (membership in the `lp` group is enough on most Linux
+  distributions; macOS needs nothing extra)
 
 ## Quick start
 
@@ -39,9 +35,10 @@ Open <http://127.0.0.1:3000>, type the label text, press 印刷.
 ## API
 
 - `POST /api/print` with `{"text": "line 1\nline 2"}` — prints one label. Each line of `text`
-  becomes one printed line; the font is `Noto Sans CJK JP` and the tape is pre-cut. Returns
-  `200 {"output": "<ptouch-print stdout>"}` on success, `400 {"error": "text is empty"}` for blank
-  text, and `502 {"error": "<ptouch-print stderr>"}` when printing fails.
+  becomes one printed line, sized to fill the loaded tape, and the blank leader is pre-cut.
+  Returns `200 {"output": "printed <w>x<h>px on <n>mm tape"}` on success,
+  `400 {"error": "text is empty"}` for blank text, and `502 {"error": "<reason>"}` when the
+  printer is missing, in Editor Lite mode, or the USB transfer fails.
 - `GET /api/health` — `{"status":"ok"}`
 - `GET /healthz` — plain-text `ok`
 
@@ -90,15 +87,17 @@ cargo test --locked
 cargo build --locked --release
 ```
 
-The Rust tests never touch a printer: they point the server at a stub script that records its
-arguments. `npm run lint:design` checks the design contract in [`DESIGN.md`](DESIGN.md).
+The Rust tests never touch a printer: the HTTP layer is tested against a recording `Printer`, and
+the USB protocol against a recording `Transport`. The renderer tests read Noto Sans CJK from
+`/usr/share/fonts/noto-cjk/`. `npm run lint:design` checks the design contract in
+[`DESIGN.md`](DESIGN.md).
 
 ## Configuration
 
 | Variable              | Default          | Purpose                                                                   |
 | --------------------- | ---------------- | ------------------------------------------------------------------------- |
 | `APP_BIND_ADDR`       | `127.0.0.1:3000` | Socket address of the HTTP listener. Use `0.0.0.0:3000` to serve the LAN. |
-| `LABEL_PRINT_COMMAND` | `ptouch-print`   | Command used to print; a path or a name resolved through `PATH`.          |
+| `LABEL_FONT`          | auto-detected    | Path to the TTF/OTF/TTC used to render labels (face 0 of a collection).   |
 | `RUST_LOG`            | `info`           | Logging filter, for example `label_server=debug,tower_http=debug`.        |
 
 ## Repository structure
@@ -107,7 +106,7 @@ arguments. `npm run lint:design` checks the design contract in [`DESIGN.md`](DES
 .
 ├── .github/workflows/  # Continuous integration
 ├── client/             # Svelte 5 page, Vite config, tests, and the npm lockfile
-├── src/                # Axum router, ptouch-print invocation, executable entry point
+├── src/                # Axum router, PT-P700 protocol (ptouch.rs), text renderer (render.rs)
 ├── Cargo.toml          # Rust package and dependency configuration
 ├── DESIGN.md           # UI design contract
 └── rust-toolchain.toml # Pinned Rust toolchain and components
@@ -118,4 +117,9 @@ Other unknown paths fall back to `client/dist/index.html`.
 
 ## License
 
-[MIT License](LICENSE).
+label-server is free software under the
+[GNU General Public License version 3](LICENSE) (GPL-3.0-only).
+
+`src/ptouch.rs` and `src/render.rs` are derived from ptouch-print,
+Copyright (C) 2013-2026 Dominic Radermacher, GPL-3.0. The original is at
+<https://git.familie-radermacher.ch/linux/ptouch-print.git>.

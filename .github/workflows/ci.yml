@@ -27,6 +27,9 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Install the label font used by the renderer tests
+        run: sudo apt-get update && sudo apt-get install --yes fonts-noto-cjk
+
       - name: Install frontend dependencies
         run: npm --prefix client ci
 
