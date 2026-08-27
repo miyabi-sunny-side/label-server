@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind(bind_addr).await?;
     info!(%bind_addr, "server listening");
 
-    axum::serve(listener, label_server::app("client/dist", printer, catalog))
+    axum::serve(listener, label_server::app(printer, catalog))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 

@@ -6,27 +6,24 @@
 pub mod ptouch;
 pub mod render;
 
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use ab_glyph::FontVec;
 use axum::{
     Json, Router,
     extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    response::Response,
+    http::{StatusCode, Uri, header},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use base64::Engine;
+use include_dir::{Dir, include_dir};
 use serde::{Deserialize, Serialize};
-use tower_http::{
-    services::{ServeDir, ServeFile},
-    trace::TraceLayer,
-};
+use tower_http::trace::TraceLayer;
+
+/// The built Svelte app, compiled into the binary. Build the client
+/// (`npm --prefix client run build`) before building the server.
+static CLIENT: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/client/dist");
 
 /// Blank tape kept free on each edge, as a percentage of the tape width.
 pub const DEFAULT_OFFSET_PERCENT: u8 = 5;
@@ -293,12 +290,7 @@ pub fn label_lines(text: &str) -> Option<Vec<String>> {
     )
 }
 
-pub fn app(
-    static_dir: impl AsRef<Path>,
-    printer: Arc<dyn Printer>,
-    catalog: Arc<FontCatalog>,
-) -> Router {
-    let static_dir = static_dir.as_ref().to_path_buf();
+pub fn app(printer: Arc<dyn Printer>, catalog: Arc<FontCatalog>) -> Router {
     let api = Router::new()
         .route("/health", get(api_health))
         .route("/fonts", get(api_fonts))
@@ -310,10 +302,24 @@ pub fn app(
     Router::new()
         .route("/healthz", get(healthz))
         .nest("/api", api)
-        .fallback_service(
-            ServeDir::new(&static_dir).fallback(ServeFile::new(static_dir.join("index.html"))),
-        )
+        .fallback(client_asset)
         .layer(TraceLayer::new_for_http())
+}
+
+/// Serves the embedded client: a matching file with its MIME type,
+/// otherwise `index.html` so client-side routes survive a reload.
+async fn client_asset(uri: Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    let file = CLIENT
+        .get_file(path)
+        .or_else(|| CLIENT.get_file("index.html"));
+    match file {
+        Some(file) => {
+            let mime = mime_guess::from_path(file.path()).first_or_octet_stream();
+            ([(header::CONTENT_TYPE, mime.as_ref())], file.contents()).into_response()
+        }
+        None => (StatusCode::NOT_FOUND, "client is not built\n").into_response(),
+    }
 }
 
 async fn healthz() -> &'static str {
@@ -527,7 +533,7 @@ mod tests {
     async fn multi_line_text_is_handed_to_the_printer_as_lines() {
         let printer = Arc::new(FakePrinter::default());
 
-        let response = app("client/dist", printer.clone(), catalog())
+        let response = app(printer.clone(), catalog())
             .oneshot(print_request("abc\ndef"))
             .await
             .unwrap();
@@ -549,7 +555,7 @@ mod tests {
     async fn an_explicit_offset_reaches_the_printer_and_out_of_range_is_rejected() {
         let printer = Arc::new(FakePrinter::default());
 
-        let response = app("client/dist", printer.clone(), catalog())
+        let response = app(printer.clone(), catalog())
             .oneshot(json_request(
                 &serde_json::json!({ "text": "abc", "offset_percent": 20 }),
             ))
@@ -559,7 +565,7 @@ mod tests {
         assert_eq!(printer.jobs.lock().unwrap()[0].offset_percent, 20);
 
         for out_of_range in [50, -1, 256] {
-            let response = app("client/dist", printer.clone(), catalog())
+            let response = app(printer.clone(), catalog())
                 .oneshot(json_request(
                     &serde_json::json!({ "text": "abc", "offset_percent": out_of_range }),
                 ))
@@ -579,7 +585,7 @@ mod tests {
     async fn font_and_scale_reach_the_printer_and_unknown_fonts_are_rejected() {
         let printer = Arc::new(FakePrinter::default());
 
-        let response = app("client/dist", printer.clone(), catalog())
+        let response = app(printer.clone(), catalog())
             .oneshot(json_request(&serde_json::json!({
                 "text": "abc", "font": "BIZUDPGothic-Regular", "font_scale_percent": 60
             })))
@@ -590,7 +596,7 @@ mod tests {
         assert_eq!(job.font.as_deref(), Some("BIZUDPGothic-Regular"));
         assert_eq!(job.font_scale_percent, 60);
 
-        let response = app("client/dist", printer.clone(), catalog())
+        let response = app(printer.clone(), catalog())
             .oneshot(json_request(
                 &serde_json::json!({ "text": "abc", "font": "Comic" }),
             ))
@@ -603,7 +609,7 @@ mod tests {
 
     #[tokio::test]
     async fn fonts_endpoint_lists_the_catalog_with_its_default() {
-        let response = app("client/dist", Arc::new(FakePrinter::default()), catalog())
+        let response = app(Arc::new(FakePrinter::default()), catalog())
             .oneshot(
                 Request::builder()
                     .uri("/api/fonts")
@@ -625,7 +631,7 @@ mod tests {
         let printer = Arc::new(FakePrinter::default());
         let request = serde_json::json!({ "text": "Gridfinity", "offset_percent": 5 });
 
-        let response = app("client/dist", printer, catalog())
+        let response = app(printer, catalog())
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -673,7 +679,7 @@ mod tests {
             serde_json::json!({ "text": "abc", "font": "Comic" }),
             serde_json::json!({ "text": "abc", "font_scale_percent": 5 }),
         ] {
-            let response = app("client/dist", Arc::new(FakePrinter::default()), catalog())
+            let response = app(Arc::new(FakePrinter::default()), catalog())
                 .oneshot(
                     Request::builder()
                         .method("POST")
@@ -707,7 +713,7 @@ mod tests {
     async fn blank_text_is_rejected_without_touching_the_printer() {
         let printer = Arc::new(FakePrinter::default());
 
-        let response = app("client/dist", printer.clone(), catalog())
+        let response = app(printer.clone(), catalog())
             .oneshot(print_request(" \n"))
             .await
             .unwrap();
@@ -723,7 +729,7 @@ mod tests {
             ..FakePrinter::default()
         });
 
-        let response = app("client/dist", printer, catalog())
+        let response = app(printer, catalog())
             .oneshot(print_request("abc"))
             .await
             .unwrap();
@@ -737,7 +743,7 @@ mod tests {
 
     #[tokio::test]
     async fn liveness_is_lightweight_plain_text() {
-        let response = app("client/dist", Arc::new(FakePrinter::default()), catalog())
+        let response = app(Arc::new(FakePrinter::default()), catalog())
             .oneshot(
                 Request::builder()
                     .uri("/healthz")
@@ -753,7 +759,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_api_routes_do_not_fall_back_to_the_spa() {
-        let response = app("client/dist", Arc::new(FakePrinter::default()), catalog())
+        let response = app(Arc::new(FakePrinter::default()), catalog())
             .oneshot(
                 Request::builder()
                     .uri("/api/missing")
@@ -766,19 +772,60 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    async fn get(uri: &str) -> axum::response::Response {
+        app(Arc::new(FakePrinter::default()), catalog())
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_embedded_client_is_served_with_its_mime_types() {
+        let response = get("/").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get("content-type").unwrap(), "text/html");
+        let html = body_string(response).await;
+        assert!(html.contains("<title>label-server</title>"));
+
+        // the bundle referenced by index.html is embedded too
+        let script = html
+            .split("src=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap()
+            .to_owned();
+        assert!(script.starts_with("/assets/index-"), "{script}");
+        assert!(
+            std::path::Path::new(&script).extension() == Some("js".as_ref()),
+            "{script}"
+        );
+        let response = get(&script).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "text/javascript"
+        );
+        let css = html
+            .split("href=\"")
+            .find(|rest| rest.starts_with("/assets/"))
+            .and_then(|rest| rest.split('"').next())
+            .unwrap()
+            .to_owned();
+        let response = get(&css).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get("content-type").unwrap(), "text/css");
+    }
+
     #[tokio::test]
     async fn unknown_client_routes_return_the_spa_with_success() {
-        let response = app("client", Arc::new(FakePrinter::default()), catalog())
-            .oneshot(
-                Request::builder()
-                    .uri("/anything")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = get("/anything/deep").await;
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers().get("content-type").unwrap(), "text/html");
+        assert!(
+            body_string(response)
+                .await
+                .contains("<title>label-server</title>")
+        );
     }
 }

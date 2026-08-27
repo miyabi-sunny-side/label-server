@@ -1,8 +1,9 @@
 # label-server
 
 Type text into a textarea, press 印刷, and a Brother PT-P700 prints the label. One Rust binary
-serves the JSON API and the compiled Svelte page, renders the text, and talks to the printer over
-USB itself (libusb is linked statically) — no CUPS, no driver, no external tool.
+serves the JSON API and the Svelte page (compiled into it), renders the text with an embedded
+font, and talks to the printer over USB itself (libusb is linked statically) — no CUPS, no driver,
+no external tool, nothing to place next to the binary.
 
 The USB protocol and the text layout rules are a Rust port of
 [ptouch-print](https://codeberg.org/askaaron/ptouch-print) by Dominic Radermacher, which is why
@@ -28,7 +29,8 @@ cd ..
 cargo run --locked
 ```
 
-Open <http://127.0.0.1:3000>, type the label text, press 印刷.
+The client must be built before the server: `cargo build` embeds `client/dist` into the binary and
+fails when it is missing. Open <http://127.0.0.1:3000>, type the label text, press 印刷.
 
 Labels are set in **BIZ UDPGothic** (Morisawa's universal-design gothic, compiled into the
 binary). Noto Sans CJK and Hiragino Sans are offered as well when the machine has them, and
@@ -130,7 +132,7 @@ the USB protocol against a recording `Transport`. The renderer tests use the emb
 ```
 
 The backend reserves `/api/*` for API routes. Unknown API paths return 404 instead of the frontend.
-Other unknown paths fall back to `client/dist/index.html`.
+Other unknown paths fall back to the embedded `index.html`.
 
 ## License
 
