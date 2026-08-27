@@ -34,10 +34,12 @@ Open <http://127.0.0.1:3000>, type the label text, press 印刷.
 
 ## API
 
-- `POST /api/print` with `{"text": "line 1\nline 2"}` — prints one label. Each line of `text`
-  becomes one printed line, sized to fill the loaded tape, and the blank leader is pre-cut.
+- `POST /api/print` with `{"text": "line 1\nline 2", "offset_percent": 5}` — prints one label.
+  Each line of `text` becomes one printed line, sized to fill the tape minus `offset_percent` of
+  its width on each edge (optional, default 5, at most 49), and the blank leader is pre-cut.
   Returns `200 {"output": "printed <w>x<h>px on <n>mm tape"}` on success,
-  `400 {"error": "text is empty"}` for blank text, and `502 {"error": "<reason>"}` when the
+  `400 {"error": "..."}` for blank text or an `offset_percent` outside 0..=49, and
+  `502 {"error": "<reason>"}` when the
   printer is missing, in Editor Lite mode, or the USB transfer fails.
 - `GET /api/health` — `{"status":"ok"}`
 - `GET /healthz` — plain-text `ok`

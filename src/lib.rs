@@ -23,14 +23,34 @@ use tower_http::{
     trace::TraceLayer,
 };
 
+/// Blank tape kept free on each edge, as a percentage of the tape width.
+pub const DEFAULT_OFFSET_PERCENT: u8 = 5;
+/// Largest offset that still leaves some tape to print on.
+pub const MAX_OFFSET_PERCENT: u8 = 49;
+
+/// One label to print.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrintJob {
+    pub lines: Vec<String>,
+    pub offset_percent: u8,
+}
+
+/// Pixels available for text once `offset_percent` of the tape width is
+/// left blank on each edge.
+#[must_use]
+pub fn print_height(tape_px: usize, offset_percent: u8) -> usize {
+    let edge = (tape_px * usize::from(offset_percent) + 50) / 100;
+    tape_px.saturating_sub(2 * edge)
+}
+
 /// Prints one label. The USB implementation is [`UsbPrinter`]; tests
 /// substitute a recorder.
 pub trait Printer: Send + Sync {
-    /// Prints `lines` top to bottom and returns a one-line summary.
+    /// Prints the job's lines top to bottom and returns a one-line summary.
     ///
     /// # Errors
     /// Returns a human-readable reason when the label could not be printed.
-    fn print(&self, lines: &[String]) -> Result<String, String>;
+    fn print(&self, job: &PrintJob) -> Result<String, String>;
 }
 
 /// Renders with a font and prints over USB.
@@ -46,13 +66,14 @@ impl UsbPrinter {
 }
 
 impl Printer for UsbPrinter {
-    fn print(&self, lines: &[String]) -> Result<String, String> {
+    fn print(&self, job: &PrintJob) -> Result<String, String> {
         let mut transport = ptouch::UsbTransport::open().map_err(|e| e.to_string())?;
-        let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let borrowed: Vec<&str> = job.lines.iter().map(String::as_str).collect();
         let mut size = (0, 0);
         let status = ptouch::print(&mut transport, true, |status| {
-            let bitmap = render::render_lines(&self.font, &borrowed, status.tape_px)
-                .map_err(|e| e.to_string())?;
+            let height = print_height(status.tape_px, job.offset_percent);
+            let bitmap =
+                render::render_lines(&self.font, &borrowed, height).map_err(|e| e.to_string())?;
             size = (bitmap.width, bitmap.height);
             Ok(bitmap)
         })
@@ -77,6 +98,9 @@ struct HealthResponse {
 #[derive(Deserialize)]
 struct PrintRequest {
     text: String,
+    /// Wide on purpose so that -1 or 256 reach our range check (400)
+    /// instead of failing JSON extraction (422).
+    offset_percent: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -133,8 +157,29 @@ async fn api_print(State(state): State<AppState>, Json(request): Json<PrintReque
     let Some(lines) = label_lines(&request.text) else {
         return error(StatusCode::BAD_REQUEST, "text is empty".to_owned());
     };
+    let offset_percent = request
+        .offset_percent
+        .map_or(Ok(DEFAULT_OFFSET_PERCENT), |value| {
+            u8::try_from(value)
+                .ok()
+                .filter(|&percent| percent <= MAX_OFFSET_PERCENT)
+                .ok_or(value)
+        });
+    let offset_percent = match offset_percent {
+        Ok(percent) => percent,
+        Err(value) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                format!("offset_percent must be 0..={MAX_OFFSET_PERCENT}, got {value}"),
+            );
+        }
+    };
+    let job = PrintJob {
+        lines,
+        offset_percent,
+    };
     let printer = state.printer;
-    match tokio::task::spawn_blocking(move || printer.print(&lines)).await {
+    match tokio::task::spawn_blocking(move || printer.print(&job)).await {
         Ok(Ok(output)) => Json(PrintResponse { output }).into_response(),
         Ok(Err(message)) => error(StatusCode::BAD_GATEWAY, message),
         Err(join) => error(StatusCode::BAD_GATEWAY, join.to_string()),
@@ -159,18 +204,18 @@ mod tests {
     };
     use tower::ServiceExt;
 
-    use super::{Printer, app, label_lines};
+    use super::{PrintJob, Printer, app, label_lines, print_height};
 
     /// Records every job; fails every job when `failure` is set.
     #[derive(Default)]
     struct FakePrinter {
-        jobs: Mutex<Vec<Vec<String>>>,
+        jobs: Mutex<Vec<PrintJob>>,
         failure: Option<String>,
     }
 
     impl Printer for FakePrinter {
-        fn print(&self, lines: &[String]) -> Result<String, String> {
-            self.jobs.lock().unwrap().push(lines.to_vec());
+        fn print(&self, job: &PrintJob) -> Result<String, String> {
+            self.jobs.lock().unwrap().push(job.clone());
             match &self.failure {
                 Some(message) => Err(message.clone()),
                 None => Ok("printed".to_owned()),
@@ -179,13 +224,15 @@ mod tests {
     }
 
     fn print_request(text: &str) -> Request<Body> {
+        json_request(&serde_json::json!({ "text": text }))
+    }
+
+    fn json_request(payload: &serde_json::Value) -> Request<Body> {
         Request::builder()
             .method("POST")
             .uri("/api/print")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(
-                serde_json::to_string(&serde_json::json!({ "text": text })).unwrap(),
-            ))
+            .body(Body::from(serde_json::to_string(payload).unwrap()))
             .unwrap()
     }
 
@@ -219,7 +266,52 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(body_string(response).await, r#"{"output":"printed"}"#);
-        assert_eq!(*printer.jobs.lock().unwrap(), [["abc", "def"]]);
+        assert_eq!(
+            *printer.jobs.lock().unwrap(),
+            [PrintJob {
+                lines: vec!["abc".to_owned(), "def".to_owned()],
+                offset_percent: 5,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_explicit_offset_reaches_the_printer_and_out_of_range_is_rejected() {
+        let printer = Arc::new(FakePrinter::default());
+
+        let response = app("client/dist", printer.clone())
+            .oneshot(json_request(
+                &serde_json::json!({ "text": "abc", "offset_percent": 20 }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(printer.jobs.lock().unwrap()[0].offset_percent, 20);
+
+        for out_of_range in [50, -1, 256] {
+            let response = app("client/dist", printer.clone())
+                .oneshot(json_request(
+                    &serde_json::json!({ "text": "abc", "offset_percent": out_of_range }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{out_of_range}");
+            assert!(
+                body_string(response)
+                    .await
+                    .contains("offset_percent must be 0..=49")
+            );
+        }
+        assert_eq!(printer.jobs.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn print_height_leaves_the_offset_blank_on_both_edges() {
+        // 12mm tape: 5% of 76px rounds to 4px per edge
+        assert_eq!(print_height(76, 5), 68);
+        assert_eq!(print_height(76, 0), 76);
+        assert_eq!(print_height(128, 10), 102);
+        assert_eq!(print_height(76, 49), 2);
     }
 
     #[tokio::test]

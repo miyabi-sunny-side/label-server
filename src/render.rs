@@ -256,6 +256,16 @@ mod tests {
     }
 
     #[test]
+    fn a_smaller_print_height_yields_a_shorter_label() {
+        let full = render_lines(&font(), &["Gridfinity"], 76).unwrap();
+        let inset = render_lines(&font(), &["Gridfinity"], 68).unwrap();
+
+        assert_eq!(inset.height, 68);
+        assert!(inset.width < full.width, "{} < {}", inset.width, full.width);
+        assert!(!ink_rows(&inset).is_empty());
+    }
+
+    #[test]
     fn japanese_text_produces_ink() {
         let bitmap = render_lines(&font(), &["ラベル"], 128).unwrap();
         assert!(!ink_rows(&bitmap).is_empty());
