@@ -6,7 +6,11 @@
 pub mod ptouch;
 pub mod render;
 
-use std::{path::Path, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use ab_glyph::FontVec;
 use axum::{
@@ -17,6 +21,7 @@ use axum::{
     response::Response,
     routing::{get, post},
 };
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tower_http::{
     services::{ServeDir, ServeFile},
@@ -28,11 +33,116 @@ pub const DEFAULT_OFFSET_PERCENT: u8 = 5;
 /// Largest offset that still leaves some tape to print on.
 pub const MAX_OFFSET_PERCENT: u8 = 49;
 
-/// One label to print.
+/// Full size: the largest font that fits the tape after the offset.
+pub const DEFAULT_FONT_SCALE_PERCENT: u8 = 100;
+pub const MIN_FONT_SCALE_PERCENT: u8 = 10;
+/// Tape assumed by previews when no printer has been asked.
+pub const DEFAULT_TAPE_MM: u8 = 12;
+/// PT-P700 print resolution.
+pub const DPI: f64 = 180.0;
+
+/// One label to print or preview.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrintJob {
     pub lines: Vec<String>,
     pub offset_percent: u8,
+    /// Font id from [`FontCatalog`]; `None` selects the catalog default.
+    pub font: Option<String>,
+    /// Shrinks the auto-fitted size; 100 keeps it.
+    pub font_scale_percent: u8,
+}
+
+/// Fonts loaded at startup, addressed by the file stem (e.g.
+/// `NotoSansCJK-Regular`). The first one is the default.
+pub struct FontCatalog {
+    fonts: BTreeMap<String, FontVec>,
+    default: String,
+}
+
+impl FontCatalog {
+    /// Loads every readable path (face 0 of collections); the first
+    /// readable one becomes the default.
+    ///
+    /// # Errors
+    /// Returns the tried paths when none of them could be loaded.
+    pub fn load(candidates: &[PathBuf]) -> Result<Self, String> {
+        let mut fonts = BTreeMap::new();
+        let mut default = None;
+        for path in candidates {
+            let Ok(data) = std::fs::read(path) else {
+                continue;
+            };
+            let Ok(font) = FontVec::try_from_vec_and_index(data, 0) else {
+                continue;
+            };
+            let id = path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if fonts.contains_key(&id) {
+                continue;
+            }
+            default.get_or_insert_with(|| id.clone());
+            fonts.insert(id, font);
+        }
+        let default = default.ok_or_else(|| {
+            format!(
+                "no label font found; set LABEL_FONT to a TTF/OTF/TTC file (tried {})",
+                candidates
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+        Ok(Self { fonts, default })
+    }
+
+    #[must_use]
+    pub fn ids(&self) -> Vec<&str> {
+        self.fonts.keys().map(String::as_str).collect()
+    }
+
+    #[must_use]
+    pub fn default_id(&self) -> &str {
+        &self.default
+    }
+
+    /// The font for a job, or the id that is not in the catalog.
+    ///
+    /// # Errors
+    /// Returns the unknown id.
+    pub fn resolve<'a>(&'a self, id: Option<&'a str>) -> Result<&'a FontVec, &'a str> {
+        let id = id.unwrap_or(&self.default);
+        self.fonts.get(id).ok_or(id)
+    }
+}
+
+/// Renders a job for a tape of `tape_px` printable pixels — the one
+/// path shared by printing and previewing.
+///
+/// # Errors
+/// Returns a human-readable reason when the font is unknown or the text
+/// cannot be laid out.
+pub fn render_job(
+    catalog: &FontCatalog,
+    job: &PrintJob,
+    tape_px: usize,
+) -> Result<render::Bitmap, String> {
+    let font = catalog
+        .resolve(job.font.as_deref())
+        .map_err(|id| format!("unknown font: {id}"))?;
+    let lines: Vec<&str> = job.lines.iter().map(String::as_str).collect();
+    let height = print_height(tape_px, job.offset_percent);
+    render::render_lines(font, &lines, height, job.font_scale_percent).map_err(|e| e.to_string())
+}
+
+/// Tape length a bitmap occupies, before the printer's own leader and
+/// cut margins.
+#[must_use]
+#[allow(clippy::cast_precision_loss)] // label widths are a few thousand px
+pub fn length_mm(width_px: usize) -> f64 {
+    (width_px as f64 * 25.4 / DPI * 10.0).round() / 10.0
 }
 
 /// Pixels available for text once `offset_percent` of the tape width is
@@ -53,27 +163,24 @@ pub trait Printer: Send + Sync {
     fn print(&self, job: &PrintJob) -> Result<String, String>;
 }
 
-/// Renders with a font and prints over USB.
+/// Renders with the catalog and prints over USB.
 pub struct UsbPrinter {
-    font: FontVec,
+    catalog: Arc<FontCatalog>,
 }
 
 impl UsbPrinter {
     #[must_use]
-    pub fn new(font: FontVec) -> Self {
-        Self { font }
+    pub fn new(catalog: Arc<FontCatalog>) -> Self {
+        Self { catalog }
     }
 }
 
 impl Printer for UsbPrinter {
     fn print(&self, job: &PrintJob) -> Result<String, String> {
         let mut transport = ptouch::UsbTransport::open().map_err(|e| e.to_string())?;
-        let borrowed: Vec<&str> = job.lines.iter().map(String::as_str).collect();
         let mut size = (0, 0);
         let status = ptouch::print(&mut transport, true, |status| {
-            let height = print_height(status.tape_px, job.offset_percent);
-            let bitmap =
-                render::render_lines(&self.font, &borrowed, height).map_err(|e| e.to_string())?;
+            let bitmap = render_job(&self.catalog, job, status.tape_px)?;
             size = (bitmap.width, bitmap.height);
             Ok(bitmap)
         })
@@ -88,6 +195,7 @@ impl Printer for UsbPrinter {
 #[derive(Clone)]
 struct AppState {
     printer: Arc<dyn Printer>,
+    catalog: Arc<FontCatalog>,
 }
 
 #[derive(Serialize)]
@@ -101,6 +209,25 @@ struct PrintRequest {
     /// Wide on purpose so that -1 or 256 reach our range check (400)
     /// instead of failing JSON extraction (422).
     offset_percent: Option<i64>,
+    font: Option<String>,
+    font_scale_percent: Option<i64>,
+    /// Preview only: the tape to assume.
+    tape_mm: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct PreviewResponse {
+    png_base64: String,
+    width_px: usize,
+    height_px: usize,
+    tape_px: usize,
+    length_mm: f64,
+}
+
+#[derive(Serialize)]
+struct FontsResponse {
+    fonts: Vec<String>,
+    default: String,
 }
 
 #[derive(Serialize)]
@@ -128,13 +255,19 @@ pub fn label_lines(text: &str) -> Option<Vec<String>> {
     )
 }
 
-pub fn app(static_dir: impl AsRef<Path>, printer: Arc<dyn Printer>) -> Router {
+pub fn app(
+    static_dir: impl AsRef<Path>,
+    printer: Arc<dyn Printer>,
+    catalog: Arc<FontCatalog>,
+) -> Router {
     let static_dir = static_dir.as_ref().to_path_buf();
     let api = Router::new()
         .route("/health", get(api_health))
+        .route("/fonts", get(api_fonts))
+        .route("/preview", post(api_preview))
         .route("/print", post(api_print))
         .fallback(api_not_found)
-        .with_state(AppState { printer });
+        .with_state(AppState { printer, catalog });
 
     Router::new()
         .route("/healthz", get(healthz))
@@ -153,31 +286,95 @@ async fn api_health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
-async fn api_print(State(state): State<AppState>, Json(request): Json<PrintRequest>) -> Response {
-    let Some(lines) = label_lines(&request.text) else {
-        return error(StatusCode::BAD_REQUEST, "text is empty".to_owned());
+async fn api_fonts(State(state): State<AppState>) -> Json<FontsResponse> {
+    Json(FontsResponse {
+        fonts: state
+            .catalog
+            .ids()
+            .iter()
+            .map(|id| (*id).to_owned())
+            .collect(),
+        default: state.catalog.default_id().to_owned(),
+    })
+}
+
+/// Validates an optional integer field into `min..=max`.
+fn percent(value: Option<i64>, default: u8, min: u8, max: u8, name: &str) -> Result<u8, String> {
+    let Some(value) = value else {
+        return Ok(default);
     };
-    let offset_percent = request
-        .offset_percent
-        .map_or(Ok(DEFAULT_OFFSET_PERCENT), |value| {
-            u8::try_from(value)
-                .ok()
-                .filter(|&percent| percent <= MAX_OFFSET_PERCENT)
-                .ok_or(value)
-        });
-    let offset_percent = match offset_percent {
-        Ok(percent) => percent,
-        Err(value) => {
-            return error(
-                StatusCode::BAD_REQUEST,
-                format!("offset_percent must be 0..={MAX_OFFSET_PERCENT}, got {value}"),
-            );
-        }
-    };
-    let job = PrintJob {
+    u8::try_from(value)
+        .ok()
+        .filter(|&v| (min..=max).contains(&v))
+        .ok_or_else(|| format!("{name} must be {min}..={max}, got {value}"))
+}
+
+/// Turns a request into a job, or the 400 message.
+fn job_from(request: &PrintRequest) -> Result<PrintJob, String> {
+    let lines = label_lines(&request.text).ok_or_else(|| "text is empty".to_owned())?;
+    let offset_percent = percent(
+        request.offset_percent,
+        DEFAULT_OFFSET_PERCENT,
+        0,
+        MAX_OFFSET_PERCENT,
+        "offset_percent",
+    )?;
+    let font_scale_percent = percent(
+        request.font_scale_percent,
+        DEFAULT_FONT_SCALE_PERCENT,
+        MIN_FONT_SCALE_PERCENT,
+        100,
+        "font_scale_percent",
+    )?;
+    Ok(PrintJob {
         lines,
         offset_percent,
+        font: request.font.clone(),
+        font_scale_percent,
+    })
+}
+
+async fn api_preview(State(state): State<AppState>, Json(request): Json<PrintRequest>) -> Response {
+    let job = match job_from(&request) {
+        Ok(job) => job,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
+    let tape_mm = match percent(request.tape_mm, DEFAULT_TAPE_MM, 1, 99, "tape_mm") {
+        Ok(mm) => mm,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    let Some(tape_px) = ptouch::tape_width_px(tape_mm).filter(|&px| px <= ptouch::MAX_PX) else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!("tape_mm {tape_mm} is not a PT-P700 tape"),
+        );
+    };
+    let bitmap = match render_job(&state.catalog, &job, tape_px) {
+        Ok(bitmap) => bitmap,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    let png = match render::encode_png(&bitmap) {
+        Ok(png) => png,
+        Err(message) => return error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    };
+    Json(PreviewResponse {
+        png_base64: base64::engine::general_purpose::STANDARD.encode(png),
+        width_px: bitmap.width,
+        height_px: bitmap.height,
+        tape_px,
+        length_mm: length_mm(bitmap.width),
+    })
+    .into_response()
+}
+
+async fn api_print(State(state): State<AppState>, Json(request): Json<PrintRequest>) -> Response {
+    let job = match job_from(&request) {
+        Ok(job) => job,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    if let Err(id) = state.catalog.resolve(job.font.as_deref()) {
+        return error(StatusCode::BAD_REQUEST, format!("unknown font: {id}"));
+    }
     let printer = state.printer;
     match tokio::task::spawn_blocking(move || printer.print(&job)).await {
         Ok(Ok(output)) => Json(PrintResponse { output }).into_response(),
@@ -202,9 +399,16 @@ mod tests {
         body::{Body, to_bytes},
         http::{Request, StatusCode, header},
     };
+    use base64::Engine;
     use tower::ServiceExt;
 
-    use super::{PrintJob, Printer, app, label_lines, print_height};
+    use super::{FontCatalog, PrintJob, Printer, app, label_lines, length_mm, print_height};
+
+    const FONT: &str = "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc";
+
+    fn catalog() -> Arc<FontCatalog> {
+        Arc::new(FontCatalog::load(&[std::path::PathBuf::from(FONT)]).unwrap())
+    }
 
     /// Records every job; fails every job when `failure` is set.
     #[derive(Default)]
@@ -259,7 +463,7 @@ mod tests {
     async fn multi_line_text_is_handed_to_the_printer_as_lines() {
         let printer = Arc::new(FakePrinter::default());
 
-        let response = app("client/dist", printer.clone())
+        let response = app("client/dist", printer.clone(), catalog())
             .oneshot(print_request("abc\ndef"))
             .await
             .unwrap();
@@ -271,6 +475,8 @@ mod tests {
             [PrintJob {
                 lines: vec!["abc".to_owned(), "def".to_owned()],
                 offset_percent: 5,
+                font: None,
+                font_scale_percent: 100,
             }]
         );
     }
@@ -279,7 +485,7 @@ mod tests {
     async fn an_explicit_offset_reaches_the_printer_and_out_of_range_is_rejected() {
         let printer = Arc::new(FakePrinter::default());
 
-        let response = app("client/dist", printer.clone())
+        let response = app("client/dist", printer.clone(), catalog())
             .oneshot(json_request(
                 &serde_json::json!({ "text": "abc", "offset_percent": 20 }),
             ))
@@ -289,7 +495,7 @@ mod tests {
         assert_eq!(printer.jobs.lock().unwrap()[0].offset_percent, 20);
 
         for out_of_range in [50, -1, 256] {
-            let response = app("client/dist", printer.clone())
+            let response = app("client/dist", printer.clone(), catalog())
                 .oneshot(json_request(
                     &serde_json::json!({ "text": "abc", "offset_percent": out_of_range }),
                 ))
@@ -305,6 +511,125 @@ mod tests {
         assert_eq!(printer.jobs.lock().unwrap().len(), 1);
     }
 
+    #[tokio::test]
+    async fn font_and_scale_reach_the_printer_and_unknown_fonts_are_rejected() {
+        let printer = Arc::new(FakePrinter::default());
+
+        let response = app("client/dist", printer.clone(), catalog())
+            .oneshot(json_request(&serde_json::json!({
+                "text": "abc", "font": "NotoSansCJK-Regular", "font_scale_percent": 60
+            })))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let job = printer.jobs.lock().unwrap()[0].clone();
+        assert_eq!(job.font.as_deref(), Some("NotoSansCJK-Regular"));
+        assert_eq!(job.font_scale_percent, 60);
+
+        let response = app("client/dist", printer.clone(), catalog())
+            .oneshot(json_request(
+                &serde_json::json!({ "text": "abc", "font": "Comic" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(body_string(response).await.contains("unknown font: Comic"));
+        assert_eq!(printer.jobs.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fonts_endpoint_lists_the_catalog_with_its_default() {
+        let response = app("client/dist", Arc::new(FakePrinter::default()), catalog())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/fonts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            body_string(response).await,
+            r#"{"fonts":["NotoSansCJK-Regular"],"default":"NotoSansCJK-Regular"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_renders_the_same_bitmap_print_would_send_as_png() {
+        let printer = Arc::new(FakePrinter::default());
+        let request = serde_json::json!({ "text": "Gridfinity", "offset_percent": 5 });
+
+        let response = app("client/dist", printer, catalog())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/preview")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+
+        // same renderer, same job, same assumed 12mm tape
+        let expected = super::render_job(
+            &catalog(),
+            &PrintJob {
+                lines: vec!["Gridfinity".to_owned()],
+                offset_percent: 5,
+                font: None,
+                font_scale_percent: 100,
+            },
+            76,
+        )
+        .unwrap();
+        assert_eq!(body["width_px"], expected.width);
+        assert_eq!(body["height_px"], 68);
+        assert_eq!(body["tape_px"], 76);
+        assert_eq!(body["length_mm"], length_mm(expected.width));
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(body["png_base64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        let decoded = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .unwrap();
+        assert_eq!(decoded.info().width as usize, expected.width);
+        assert_eq!(decoded.info().height as usize, 68);
+    }
+
+    #[tokio::test]
+    async fn preview_rejects_unknown_tapes_and_fonts() {
+        for payload in [
+            serde_json::json!({ "text": "abc", "tape_mm": 36 }),
+            serde_json::json!({ "text": "abc", "font": "Comic" }),
+            serde_json::json!({ "text": "abc", "font_scale_percent": 5 }),
+        ] {
+            let response = app("client/dist", Arc::new(FakePrinter::default()), catalog())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/preview")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(payload.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{payload}");
+        }
+    }
+
+    #[test]
+    fn length_is_derived_from_180_dpi() {
+        assert!((length_mm(180) - 25.4).abs() < 1e-9);
+        assert!((length_mm(348) - 49.1).abs() < 1e-9);
+    }
+
     #[test]
     fn print_height_leaves_the_offset_blank_on_both_edges() {
         // 12mm tape: 5% of 76px rounds to 4px per edge
@@ -318,7 +643,7 @@ mod tests {
     async fn blank_text_is_rejected_without_touching_the_printer() {
         let printer = Arc::new(FakePrinter::default());
 
-        let response = app("client/dist", printer.clone())
+        let response = app("client/dist", printer.clone(), catalog())
             .oneshot(print_request(" \n"))
             .await
             .unwrap();
@@ -334,7 +659,7 @@ mod tests {
             ..FakePrinter::default()
         });
 
-        let response = app("client/dist", printer)
+        let response = app("client/dist", printer, catalog())
             .oneshot(print_request("abc"))
             .await
             .unwrap();
@@ -348,7 +673,7 @@ mod tests {
 
     #[tokio::test]
     async fn liveness_is_lightweight_plain_text() {
-        let response = app("client/dist", Arc::new(FakePrinter::default()))
+        let response = app("client/dist", Arc::new(FakePrinter::default()), catalog())
             .oneshot(
                 Request::builder()
                     .uri("/healthz")
@@ -364,7 +689,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_api_routes_do_not_fall_back_to_the_spa() {
-        let response = app("client/dist", Arc::new(FakePrinter::default()))
+        let response = app("client/dist", Arc::new(FakePrinter::default()), catalog())
             .oneshot(
                 Request::builder()
                     .uri("/api/missing")
@@ -379,7 +704,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_client_routes_return_the_spa_with_success() {
-        let response = app("client", Arc::new(FakePrinter::default()))
+        let response = app("client", Arc::new(FakePrinter::default()), catalog())
             .oneshot(
                 Request::builder()
                     .uri("/anything")

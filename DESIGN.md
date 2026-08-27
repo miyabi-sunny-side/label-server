@@ -107,10 +107,15 @@ components:
     textColor: "{colors.on-surface}"
     rounded: "{rounded.sm}"
     size: 36px
-  textarea:
+  input:
     backgroundColor: "{colors.surface}"
     textColor: "{colors.on-surface}"
     typography: "{typography.body}"
+    rounded: "{rounded.sm}"
+    padding: 8px
+  tape-preview:
+    backgroundColor: "{colors.surface-raised}"
+    textColor: "{colors.muted}"
     rounded: "{rounded.sm}"
     padding: 8px
   modal:
@@ -167,9 +172,16 @@ depends on nothing outside this repository.
 - **Label text** — the textarea contents. Each line becomes one printed
   line; leading and trailing blank lines are dropped, inner blank lines
   are kept. Blank text is not printable.
-- **Print request** — one `POST /api/print` per press. The printer,
-  font, and cut mode are fixed by the server; the UI holds no printer
-  settings.
+- **Print options** — font (one of the server's catalog, default
+  preselected), offset (% of the tape width kept blank on each edge,
+  0–49, default 5) and 文字サイズ (% of the auto-fitted size, 10–100,
+  default 100). The same options go to the preview and to the print.
+- **Preview** — the server renders the exact bitmap it would print, for
+  an assumed 12mm tape, and the UI shows it 1:1 with the tape length it
+  occupies (before the printer's leader and cut margins). It refreshes
+  300ms after the last change; blank text shows no preview.
+- **Print request** — one `POST /api/print` per press. The cut mode and
+  the real tape width come from the printer.
 - **Print state** — `idle | printing | success | error`, exposed on the
   form as `data-state`. Exactly one request is in flight at a time.
 
@@ -240,14 +252,15 @@ One typeface — the platform `system-ui` stack. No webfonts. Exactly five
 roles, exposed as font-size tokens `--fs-xs..xl` (12/14/15/16/17px):
 
 - **Title (`--fs-xl` 17px / 600 / 1.3):** modal headers.
-- **Body (`--fs-lg` 16px / 400 / 1.6):** the textarea text. Never
-  smaller — what is typed is what gets printed, so it must be readable.
+- **Body (`--fs-lg` 16px / 400 / 1.6):** the textarea, select and number
+  inputs. Never smaller — what is typed is what gets printed, so it must
+  be readable.
 - **Body Small (`--fs-sm` 14px / 400 / 1.5):** status text and the error
   banner.
 - **Label (`--fs-md` 15px / 500 / 1.2):** buttons, menu items, the app
   title.
-- **Caption (`--fs-xs` 12px / 400 / 1.4):** the field caption above the
-  textarea — always `muted`.
+- **Caption (`--fs-xs` 12px / 400 / 1.4):** field captions above every
+  input and the preview's tape-length line — always `muted`.
 
 If a new size feels needed, use weight or muted color instead.
 
@@ -265,10 +278,13 @@ The shell stacks two rows:
 One breakpoint: **768px**. Below it, a single column with `--sp-3` side
 gutters; at and above, the content column centers at max-width 720px with
 `--sp-5` gutters. Bands stay full-width at all widths. The page never
-scrolls horizontally at 320px and up.
+scrolls horizontally at 320px and up — the preview strip scrolls
+internally when a label is wider than the column.
 
 Spacing snaps to the 4px scale `--sp-1..5` (4/8/12/16/24px). The form
 stacks its rows with `--sp-3` gaps; caption-to-field is `--sp-1`; the
+settings row is a grid (font 2fr, offset 1fr, size 1fr; below 768px the
+font spans a full row above the two numbers) with `--sp-3` gaps; the
 action row lays out button and status with `--sp-3`. No off-scale
 values.
 
@@ -288,8 +304,8 @@ indication is never removed outright.
 
 Soft-rectangle language, tokens `--radius-sm/md/lg/full` (6/8/12/9999px):
 
-- **sm (6px):** buttons, the textarea, the error banner, all small
-  controls.
+- **sm (6px):** buttons, every input, the preview strip, the error
+  banner, all small controls.
 - **md (8px):** reserved (no list rows today).
 - **lg (12px):** modals and floating menus.
 - **full:** the spinner only.
@@ -344,10 +360,23 @@ entry.
 - **Print form — the only page.** A `<form>` carrying
   `data-state="idle|printing|success|error"`:
   - _field:_ a `<label>` wrapping the caption ラベルの文字 (caption,
-    muted) and the textarea (textarea recipe: surface bg, 1px hairline,
+    muted) and the textarea (input recipe: surface bg, 1px hairline,
     sm radius, 8px padding, body type, 4 visible rows, vertical resize
     only; focus swaps the border to accent under the shared focus ring).
     Placeholder reads 改行で複数行になります.
+  - _settings row:_ three labelled inputs in the input recipe — フォント
+    (`<select>` listing the catalog ids, default preselected),
+    オフセット (%) (`type="number"` 0–49) and 文字サイズ (%)
+    (`type="number"` 10–100). Every change re-renders the preview.
+  - _preview:_ caption プレビュー (12mm テープ想定), then the tape strip
+    (tape-preview recipe: surface-raised bg, 1px hairline, sm radius, 8px
+    padding, min-height 76px, horizontal scroll) carrying
+    `data-preview="idle|loading|ready|error"`: _idle_ shows the muted
+    hint 文字を入力するとここに表示されます; _loading_ the accent spinner
+    + 描画中…; _ready_ the rendered label as an `<img alt="ラベルのプレビュー">`
+    at 1 CSS px per printed px on a white label ground; _error_ the
+    server's message in danger. Below a ready preview a caption reads
+    長さ 約 N mm (W px、裁断前・機械の余白を除く).
   - _action row:_ the primary button 印刷 (`type="submit"`, accent bg,
     surface-raised text) followed by the status slot. Enter inside the
     textarea inserts a newline; the button is the only way to submit.
@@ -376,8 +405,10 @@ entry.
 
 ## Non-goals
 
-- No label preview, font picker, size picker, or tape settings — the
-  printer reports the tape and the server fixes the font.
+- No tape-width setting — the printer reports the loaded tape when
+  printing; the preview assumes 12mm.
+- No calibration of the preview against the physical label (leader,
+  cut margin, thermal spread) — deliberately deferred.
 - No history of printed labels, no templates, no accounts.
 - No routing: `/` is the whole app; every other path serves the same
   page.
@@ -397,8 +428,9 @@ entry.
   `"dark"` set `data-theme` on `<html>` before first paint; absent key
   (auto) leaves the attribute off. `Icon.svelte` is the sole icon
   source.
-- The print form is `client/src/pages/Print.svelte`; the request goes
-  through `client/src/lib/api.ts`.
+- The print form is `client/src/pages/Print.svelte`; requests go
+  through `client/src/lib/api.ts` (`/api/fonts`, `/api/preview`,
+  `/api/print`).
 
 ## Verification
 
@@ -416,8 +448,13 @@ entry.
      `document.documentElement.scrollWidth` never exceeds the
      viewport, with the menu closed or open.
   4. The form's `data-state` walks idle → printing → success (or error)
-     on one press; during printing the 印刷 button and textarea are
-     disabled and exactly one `POST /api/print` is sent.
+     on one press; during printing the 印刷 button and every input are
+     disabled and exactly one `POST /api/print` is sent, carrying the
+     same font / offset / size as the last preview.
+  4b. Typing text then pausing 300ms sends one `POST /api/preview`; the
+     strip's `data-preview` reaches `ready`, the `<img>` height equals
+     the returned `height_px`, and the caption states the mm length.
+     Blank text returns the strip to `idle` without a request.
   5. Chrome icons are all inline SVG on the 24×24 viewBox grid, stroked
      with `currentColor` and rendered at 1.2em; no emoji or glyph icons
      anywhere.

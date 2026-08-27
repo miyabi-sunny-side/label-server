@@ -8,6 +8,8 @@ license = "GPL-3.0-only"
 [dependencies]
 ab_glyph = "0.2.32"
 axum = "0.8.9"
+base64 = "0.23.1"
+png = "0.18.1"
 rusb = { version = "0.9.4", features = ["vendored"] }
 serde = { version = "1.0.229", features = ["derive"] }
 tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal"] }

@@ -13,7 +13,8 @@ this project is licensed under the GPLv3 (see [License](#license)).
 - Rust 1.96.0 (the checked-in toolchain file selects it automatically through `rustup`)
 - Node.js 24 LTS and npm
 - A TrueType / OpenType font with the glyphs you print. Noto Sans CJK is picked up automatically
-  from its usual Linux locations, Hiragino Sans on macOS; anything else goes in `LABEL_FONT`
+  from its usual Linux locations, Hiragino Sans on macOS; every font found joins the catalog
+  offered in the UI, and `LABEL_FONT` adds one more as the default
 - A PT-P700 connected over USB with **Editor Lite turned off** — hold the Editor Lite button for
   about two seconds until its lamp goes out. While the lamp is on, the printer shows up as a USB
   disk (`04f9:2064`) instead of a printer (`04f9:2061`) and nothing can print.
@@ -34,13 +35,26 @@ Open <http://127.0.0.1:3000>, type the label text, press 印刷.
 
 ## API
 
-- `POST /api/print` with `{"text": "line 1\nline 2", "offset_percent": 5}` — prints one label.
-  Each line of `text` becomes one printed line, sized to fill the tape minus `offset_percent` of
-  its width on each edge (optional, default 5, at most 49), and the blank leader is pre-cut.
-  Returns `200 {"output": "printed <w>x<h>px on <n>mm tape"}` on success,
-  `400 {"error": "..."}` for blank text or an `offset_percent` outside 0..=49, and
+All label options are shared by printing and previewing:
+
+| Field                | Default            | Meaning                                                              |
+| -------------------- | ------------------ | -------------------------------------------------------------------- |
+| `text`               | required           | One printed line per line of text.                                   |
+| `offset_percent`     | `5`                | Blank tape kept on each edge, as % of the tape width (0–49).         |
+| `font`               | catalog default    | A font id from `GET /api/fonts`.                                     |
+| `font_scale_percent` | `100`              | Shrinks the auto-fitted font size (10–100).                          |
+
+- `POST /api/print` with `{"text": "line 1\nline 2", ...}` — prints one label on the loaded tape
+  with the blank leader pre-cut. Returns `200 {"output": "printed <w>x<h>px on <n>mm tape"}` on
+  success, `400 {"error": "..."}` for blank text, an unknown font, or an option out of range, and
   `502 {"error": "<reason>"}` when the
   printer is missing, in Editor Lite mode, or the USB transfer fails.
+- `POST /api/preview` with the same fields plus `tape_mm` (default 12) — renders exactly what
+  `/api/print` would send, without a printer. Returns `{"png_base64", "width_px", "height_px",
+  "tape_px", "length_mm"}`; `length_mm` is the tape the label occupies at 180 dpi, before the
+  printer's own leader and cut margins.
+- `GET /api/fonts` — `{"fonts": ["<id>", ...], "default": "<id>"}`. Ids are the file stems of the
+  fonts found at startup.
 - `GET /api/health` — `{"status":"ok"}`
 - `GET /healthz` — plain-text `ok`
 
@@ -99,7 +113,7 @@ the USB protocol against a recording `Transport`. The renderer tests read Noto S
 | Variable              | Default          | Purpose                                                                   |
 | --------------------- | ---------------- | ------------------------------------------------------------------------- |
 | `APP_BIND_ADDR`       | `127.0.0.1:3000` | Socket address of the HTTP listener. Use `0.0.0.0:3000` to serve the LAN. |
-| `LABEL_FONT`          | auto-detected    | Path to the TTF/OTF/TTC used to render labels (face 0 of a collection).   |
+| `LABEL_FONT`          | unset            | Extra TTF/OTF/TTC to load first (it becomes the default font).            |
 | `RUST_LOG`            | `info`           | Logging filter, for example `label_server=debug,tower_http=debug`.        |
 
 ## Repository structure

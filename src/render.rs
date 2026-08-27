@@ -132,7 +132,8 @@ fn find_scale<F: Font>(font: &F, text: &str, want_px: usize) -> Option<u32> {
 }
 
 /// Renders `lines` stacked top to bottom into a bitmap `print_height` px
-/// tall, using the largest font size at which every line fits its slot.
+/// tall, using the largest font size at which every line fits its slot,
+/// shrunk to `scale_percent` of that size (100 keeps it).
 ///
 /// # Errors
 /// Returns [`RenderError::NoLines`] for an empty slice and
@@ -141,6 +142,7 @@ pub fn render_lines<F: Font>(
     font: &F,
     lines: &[&str],
     print_height: usize,
+    scale_percent: u8,
 ) -> Result<Bitmap, RenderError> {
     if lines.is_empty() {
         return Err(RenderError::NoLines);
@@ -156,6 +158,7 @@ pub fn render_lines<F: Font>(
             lines: lines.len(),
         })?;
     let scale = if scale == u32::MAX { MIN_SCALE } else { scale };
+    let scale = (scale * u32::from(scale_percent) / 100).max(MIN_SCALE);
     let px = PxScale::from(scale as f32);
     let laid_out: Vec<Line> = lines.iter().map(|line| layout(font, line, px)).collect();
 
@@ -209,11 +212,32 @@ pub fn render_lines<F: Font>(
     Ok(bitmap)
 }
 
+/// Encodes the bitmap as an 8-bit grayscale PNG: ink is 0x00, blank 0xff.
+///
+/// # Errors
+/// Returns the encoder's message.
+pub fn encode_png(bitmap: &Bitmap) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, bitmap.width as u32, bitmap.height as u32);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+        let data: Vec<u8> = bitmap
+            .pixels
+            .iter()
+            .map(|&ink| if ink { 0x00 } else { 0xff })
+            .collect();
+        writer.write_image_data(&data).map_err(|e| e.to_string())?;
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use ab_glyph::FontVec;
 
-    use super::{Bitmap, render_lines};
+    use super::{Bitmap, encode_png, render_lines};
 
     const FONT: &str = "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc";
 
@@ -229,7 +253,7 @@ mod tests {
 
     #[test]
     fn a_single_line_fills_the_tape_height() {
-        let bitmap = render_lines(&font(), &["abc"], 76).unwrap();
+        let bitmap = render_lines(&font(), &["abc"], 76, 100).unwrap();
 
         assert_eq!(bitmap.height, 76);
         assert!(bitmap.width > 0);
@@ -241,7 +265,7 @@ mod tests {
 
     #[test]
     fn two_lines_each_stay_inside_their_half() {
-        let bitmap = render_lines(&font(), &["abc", "abc"], 76).unwrap();
+        let bitmap = render_lines(&font(), &["abc", "abc"], 76, 100).unwrap();
 
         assert_eq!(bitmap.height, 76);
         let rows = ink_rows(&bitmap);
@@ -257,8 +281,8 @@ mod tests {
 
     #[test]
     fn a_smaller_print_height_yields_a_shorter_label() {
-        let full = render_lines(&font(), &["Gridfinity"], 76).unwrap();
-        let inset = render_lines(&font(), &["Gridfinity"], 68).unwrap();
+        let full = render_lines(&font(), &["Gridfinity"], 76, 100).unwrap();
+        let inset = render_lines(&font(), &["Gridfinity"], 68, 100).unwrap();
 
         assert_eq!(inset.height, 68);
         assert!(inset.width < full.width, "{} < {}", inset.width, full.width);
@@ -266,14 +290,44 @@ mod tests {
     }
 
     #[test]
+    fn a_scale_below_full_shrinks_the_glyphs() {
+        let full = render_lines(&font(), &["Gridfinity"], 76, 100).unwrap();
+        let half = render_lines(&font(), &["Gridfinity"], 76, 50).unwrap();
+
+        let span = |b: &Bitmap| {
+            let rows = ink_rows(b);
+            rows.last().unwrap() - rows.first().unwrap() + 1
+        };
+        assert_eq!(half.height, 76);
+        assert!(half.width < full.width);
+        // ink height is close to half (font sizes are integers)
+        assert!((span(&half) as f64) < span(&full) as f64 * 0.6);
+        assert!((span(&half) as f64) > span(&full) as f64 * 0.4);
+    }
+
+    #[test]
+    fn png_encodes_ink_as_black_on_white() {
+        let mut bitmap = Bitmap::new(2, 1);
+        bitmap.set(1, 0);
+        let png = encode_png(&bitmap).unwrap();
+        let mut reader = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        assert_eq!((info.width, info.height), (2, 1));
+        assert_eq!(&buf[..2], &[0xff, 0x00]);
+    }
+
+    #[test]
     fn japanese_text_produces_ink() {
-        let bitmap = render_lines(&font(), &["ラベル"], 128).unwrap();
+        let bitmap = render_lines(&font(), &["ラベル"], 128, 100).unwrap();
         assert!(!ink_rows(&bitmap).is_empty());
     }
 
     #[test]
     fn blank_lines_keep_their_slot() {
-        let bitmap = render_lines(&font(), &["abc", "", "abc"], 128).unwrap();
+        let bitmap = render_lines(&font(), &["abc", "", "abc"], 128, 100).unwrap();
         let rows = ink_rows(&bitmap);
         assert!(rows.iter().any(|&y| y < 42));
         assert!(!rows.iter().any(|&y| (45..83).contains(&y)));
