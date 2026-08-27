@@ -22,6 +22,12 @@ const SYSTEM_FONTS: &[&str] = &[
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // The release updater checks that a downloaded binary names its tag.
+    if env::args_os().nth(1).is_some_and(|arg| arg == "--version") {
+        println!("label-server {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),

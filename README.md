@@ -37,7 +37,8 @@ chmod +x label-server-linux-x86_64
 ./label-server-linux-x86_64
 ```
 
-On macOS use `shasum -a 256 -c` for the checksum. The binaries are **not code-signed**: after
+`label-server --version` prints `label-server X.Y.Z` (the release tag without its `v`), which
+lets an updater confirm what it downloaded. On macOS use `shasum -a 256 -c` for the checksum. The binaries are **not code-signed**: after
 verifying the checksum, clear the quarantine flag once so Gatekeeper lets it run —
 `xattr -d com.apple.quarantine label-server-macos-aarch64`. The macOS build is produced by the
 release workflow but has not yet been exercised against a printer on a Mac.
