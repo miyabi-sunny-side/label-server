@@ -5,16 +5,16 @@
 
 use std::{env, error::Error, net::SocketAddr, path::PathBuf, sync::Arc};
 
-use label_server::FontCatalog;
+use label_server::{EMBEDDED_FONT, EMBEDDED_FONT_ID, FontCatalog, FontSource};
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:3000";
 
-/// Fonts tried in order when `LABEL_FONT` is not set. Face 0 of the Noto
-/// CJK collection is the Japanese face.
-const DEFAULT_FONTS: &[&str] = &[
+/// System fonts offered next to the embedded one when present. Face 0 of
+/// the Noto CJK collection is the Japanese face.
+const SYSTEM_FONTS: &[&str] = &[
     "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .init();
 
     let bind_addr = bind_addr_from_env()?;
-    let catalog = Arc::new(FontCatalog::load(&font_candidates())?);
+    let catalog = Arc::new(FontCatalog::load(&font_sources())?);
     info!(fonts = ?catalog.ids(), default = catalog.default_id(), "label fonts loaded");
     let printer = Arc::new(label_server::UsbPrinter::new(Arc::clone(&catalog)));
 
@@ -51,15 +51,23 @@ fn bind_addr_from_env() -> Result<SocketAddr, Box<dyn Error>> {
         .map_err(Into::into)
 }
 
-/// `LABEL_FONT` first (so it becomes the default), then the built-in
-/// candidates; every readable one joins the catalog.
-fn font_candidates() -> Vec<PathBuf> {
-    let mut candidates: Vec<PathBuf> = env::var_os("LABEL_FONT")
-        .map(PathBuf::from)
+/// `LABEL_FONT` first (so it becomes the default), then the embedded
+/// font, then the system candidates; every loadable one joins the catalog.
+fn font_sources() -> Vec<FontSource> {
+    let mut sources: Vec<FontSource> = env::var_os("LABEL_FONT")
+        .map(|path| FontSource::Path(PathBuf::from(path)))
         .into_iter()
         .collect();
-    candidates.extend(DEFAULT_FONTS.iter().map(PathBuf::from));
-    candidates
+    sources.push(FontSource::Embedded {
+        id: EMBEDDED_FONT_ID,
+        bytes: EMBEDDED_FONT,
+    });
+    sources.extend(
+        SYSTEM_FONTS
+            .iter()
+            .map(|path| FontSource::Path(PathBuf::from(path))),
+    );
+    sources
 }
 
 async fn shutdown_signal() {

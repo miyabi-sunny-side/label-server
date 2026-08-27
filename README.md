@@ -12,9 +12,6 @@ this project is licensed under the GPLv3 (see [License](#license)).
 
 - Rust 1.96.0 (the checked-in toolchain file selects it automatically through `rustup`)
 - Node.js 24 LTS and npm
-- A TrueType / OpenType font with the glyphs you print. Noto Sans CJK is picked up automatically
-  from its usual Linux locations, Hiragino Sans on macOS; every font found joins the catalog
-  offered in the UI, and `LABEL_FONT` adds one more as the default
 - A PT-P700 connected over USB with **Editor Lite turned off** — hold the Editor Lite button for
   about two seconds until its lamp goes out. While the lamp is on, the printer shows up as a USB
   disk (`04f9:2064`) instead of a printer (`04f9:2061`) and nothing can print.
@@ -32,6 +29,10 @@ cargo run --locked
 ```
 
 Open <http://127.0.0.1:3000>, type the label text, press 印刷.
+
+Labels are set in **BIZ UDPGothic** (Morisawa's universal-design gothic, compiled into the
+binary). Noto Sans CJK and Hiragino Sans are offered as well when the machine has them, and
+`LABEL_FONT` adds any TTF/OTF/TTC as the default.
 
 ## API
 
@@ -104,16 +105,15 @@ cargo build --locked --release
 ```
 
 The Rust tests never touch a printer: the HTTP layer is tested against a recording `Printer`, and
-the USB protocol against a recording `Transport`. The renderer tests read Noto Sans CJK from
-`/usr/share/fonts/noto-cjk/`. `npm run lint:design` checks the design contract in
-[`DESIGN.md`](DESIGN.md).
+the USB protocol against a recording `Transport`. The renderer tests use the embedded font.
+`npm run lint:design` checks the design contract in [`DESIGN.md`](DESIGN.md).
 
 ## Configuration
 
 | Variable              | Default          | Purpose                                                                   |
 | --------------------- | ---------------- | ------------------------------------------------------------------------- |
 | `APP_BIND_ADDR`       | `127.0.0.1:3000` | Socket address of the HTTP listener. Use `0.0.0.0:3000` to serve the LAN. |
-| `LABEL_FONT`          | unset            | Extra TTF/OTF/TTC to load first (it becomes the default font).            |
+| `LABEL_FONT`          | unset            | TTF/OTF/TTC to load first; it becomes the default instead of BIZ UDPGothic. |
 | `RUST_LOG`            | `info`           | Logging filter, for example `label_server=debug,tower_http=debug`.        |
 
 ## Repository structure
@@ -123,6 +123,7 @@ the USB protocol against a recording `Transport`. The renderer tests read Noto S
 ├── .github/workflows/  # Continuous integration
 ├── client/             # Svelte 5 page, Vite config, tests, and the npm lockfile
 ├── src/                # Axum router, PT-P700 protocol (ptouch.rs), text renderer (render.rs)
+├── fonts/              # BIZ UDPGothic (OFL) embedded into the binary
 ├── Cargo.toml          # Rust package and dependency configuration
 ├── DESIGN.md           # UI design contract
 └── rust-toolchain.toml # Pinned Rust toolchain and components
@@ -139,3 +140,7 @@ label-server is free software under the
 `src/ptouch.rs` and `src/render.rs` are derived from ptouch-print,
 Copyright (C) 2013-2026 Dominic Radermacher, GPL-3.0. The original is at
 <https://git.familie-radermacher.ch/linux/ptouch-print.git>.
+
+The embedded font `fonts/BIZUDPGothic-Regular.ttf` is BIZ UDPGothic, Copyright 2022 The BIZ
+UDGothic Project Authors, licensed under the SIL Open Font License 1.1
+([`fonts/OFL-BIZUDPGothic.txt`](fonts/OFL-BIZUDPGothic.txt)).

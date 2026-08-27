@@ -239,10 +239,8 @@ mod tests {
 
     use super::{Bitmap, encode_png, render_lines};
 
-    const FONT: &str = "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc";
-
     fn font() -> FontVec {
-        FontVec::try_from_vec_and_index(std::fs::read(FONT).unwrap(), 0).unwrap()
+        FontVec::try_from_vec(crate::EMBEDDED_FONT.to_vec()).unwrap()
     }
 
     fn ink_rows(bitmap: &Bitmap) -> Vec<usize> {

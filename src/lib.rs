@@ -52,33 +52,57 @@ pub struct PrintJob {
     pub font_scale_percent: u8,
 }
 
-/// Fonts loaded at startup, addressed by the file stem (e.g.
-/// `NotoSansCJK-Regular`). The first one is the default.
+/// The font shipped inside the binary: `BIZ UDPGothic` Regular (Morisawa,
+/// SIL Open Font License 1.1, see fonts/OFL-BIZUDPGothic.txt). It is the
+/// default unless `LABEL_FONT` names another one.
+pub const EMBEDDED_FONT_ID: &str = "BIZUDPGothic-Regular";
+pub const EMBEDDED_FONT: &[u8] = include_bytes!("../fonts/BIZUDPGothic-Regular.ttf");
+
+/// Where a catalog font comes from.
+#[derive(Debug, Clone)]
+pub enum FontSource {
+    /// A TTF/OTF/TTC on disk (face 0 of a collection); skipped when unreadable.
+    Path(PathBuf),
+    /// Bytes compiled into the binary.
+    Embedded {
+        id: &'static str,
+        bytes: &'static [u8],
+    },
+}
+
+/// Fonts loaded at startup, addressed by id (the file stem for files).
+/// The first loadable source is the default.
 pub struct FontCatalog {
     fonts: BTreeMap<String, FontVec>,
     default: String,
 }
 
 impl FontCatalog {
-    /// Loads every readable path (face 0 of collections); the first
-    /// readable one becomes the default.
+    /// Loads every loadable source in order; the first one becomes the
+    /// default and duplicate ids keep their first entry.
     ///
     /// # Errors
-    /// Returns the tried paths when none of them could be loaded.
-    pub fn load(candidates: &[PathBuf]) -> Result<Self, String> {
+    /// Returns the tried sources when none of them could be loaded.
+    pub fn load(sources: &[FontSource]) -> Result<Self, String> {
         let mut fonts = BTreeMap::new();
         let mut default = None;
-        for path in candidates {
-            let Ok(data) = std::fs::read(path) else {
-                continue;
+        for source in sources {
+            let (id, data) = match source {
+                FontSource::Path(path) => {
+                    let Ok(data) = std::fs::read(path) else {
+                        continue;
+                    };
+                    let id = path
+                        .file_stem()
+                        .map(|stem| stem.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    (id, data)
+                }
+                FontSource::Embedded { id, bytes } => ((*id).to_owned(), bytes.to_vec()),
             };
             let Ok(font) = FontVec::try_from_vec_and_index(data, 0) else {
                 continue;
             };
-            let id = path
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-                .unwrap_or_default();
             if fonts.contains_key(&id) {
                 continue;
             }
@@ -87,15 +111,29 @@ impl FontCatalog {
         }
         let default = default.ok_or_else(|| {
             format!(
-                "no label font found; set LABEL_FONT to a TTF/OTF/TTC file (tried {})",
-                candidates
+                "no label font could be loaded (tried {})",
+                sources
                     .iter()
-                    .map(|p| p.display().to_string())
+                    .map(|s| match s {
+                        FontSource::Path(p) => p.display().to_string(),
+                        FontSource::Embedded { id, .. } => format!("embedded {id}"),
+                    })
                     .collect::<Vec<_>>()
                     .join(", ")
             )
         })?;
         Ok(Self { fonts, default })
+    }
+
+    /// The embedded font alone.
+    ///
+    /// # Errors
+    /// Cannot fail unless the embedded bytes are not a font.
+    pub fn embedded() -> Result<Self, String> {
+        Self::load(&[FontSource::Embedded {
+            id: EMBEDDED_FONT_ID,
+            bytes: EMBEDDED_FONT,
+        }])
     }
 
     #[must_use]
@@ -402,12 +440,38 @@ mod tests {
     use base64::Engine;
     use tower::ServiceExt;
 
-    use super::{FontCatalog, PrintJob, Printer, app, label_lines, length_mm, print_height};
-
-    const FONT: &str = "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc";
+    use super::{
+        EMBEDDED_FONT, EMBEDDED_FONT_ID, FontCatalog, FontSource, PrintJob, Printer, app,
+        label_lines, length_mm, print_height,
+    };
 
     fn catalog() -> Arc<FontCatalog> {
-        Arc::new(FontCatalog::load(&[std::path::PathBuf::from(FONT)]).unwrap())
+        Arc::new(FontCatalog::embedded().unwrap())
+    }
+
+    #[test]
+    fn the_embedded_font_is_the_default_unless_a_file_comes_first() {
+        let embedded = FontSource::Embedded {
+            id: EMBEDDED_FONT_ID,
+            bytes: EMBEDDED_FONT,
+        };
+        let dir = std::env::temp_dir().join(format!("label-server-font-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("MyLabelFont.ttf");
+        std::fs::write(&file, EMBEDDED_FONT).unwrap();
+        let missing = dir.join("missing.ttf");
+
+        let catalog =
+            FontCatalog::load(&[embedded.clone(), FontSource::Path(file.clone())]).unwrap();
+        assert_eq!(catalog.default_id(), "BIZUDPGothic-Regular");
+        assert_eq!(catalog.ids(), ["BIZUDPGothic-Regular", "MyLabelFont"]);
+
+        let catalog =
+            FontCatalog::load(&[FontSource::Path(missing), FontSource::Path(file), embedded])
+                .unwrap();
+        assert_eq!(catalog.default_id(), "MyLabelFont");
+        assert!(catalog.resolve(Some("BIZUDPGothic-Regular")).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Records every job; fails every job when `failure` is set.
@@ -517,13 +581,13 @@ mod tests {
 
         let response = app("client/dist", printer.clone(), catalog())
             .oneshot(json_request(&serde_json::json!({
-                "text": "abc", "font": "NotoSansCJK-Regular", "font_scale_percent": 60
+                "text": "abc", "font": "BIZUDPGothic-Regular", "font_scale_percent": 60
             })))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let job = printer.jobs.lock().unwrap()[0].clone();
-        assert_eq!(job.font.as_deref(), Some("NotoSansCJK-Regular"));
+        assert_eq!(job.font.as_deref(), Some("BIZUDPGothic-Regular"));
         assert_eq!(job.font_scale_percent, 60);
 
         let response = app("client/dist", printer.clone(), catalog())
@@ -552,7 +616,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             body_string(response).await,
-            r#"{"fonts":["NotoSansCJK-Regular"],"default":"NotoSansCJK-Regular"}"#
+            r#"{"fonts":["BIZUDPGothic-Regular"],"default":"BIZUDPGothic-Regular"}"#
         );
     }
 
