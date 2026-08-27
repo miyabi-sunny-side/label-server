@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  # Manual runs build the same binaries and keep them as workflow artifacts
+  # (no GitHub Release is created) — use this to verify a runner before tagging.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: label-server-linux-x86_64
+          - os: macos-15 # Apple Silicon runner
+            target: aarch64-apple-darwin
+            artifact: label-server-macos-aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          targets: ${{ matrix.target }}
+
+      # The client is compiled into the binary, so it must be built first.
+      - name: Build client
+        run: |
+          npm --prefix client ci
+          npm --prefix client run build
+
+      - name: Build release binary
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Package binary and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "target/${{ matrix.target }}/release/label-server" "${{ matrix.artifact }}"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            shasum -a 256 "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
+          else
+            sha256sum "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
+          fi
+          cat "${{ matrix.artifact }}.sha256"
+
+      - name: Smoke-test the packaged binary from an empty directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="$(mktemp -d)"
+          server_pid=""
+          # Installed before anything can fail: stops the server (if started)
+          # and removes the directory on every exit path.
+          trap 'if [[ -n "$server_pid" ]]; then kill -TERM "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi; rm -rf "$dir"' EXIT
+          cp "${{ matrix.artifact }}" "$dir/label-server"
+          (cd "$dir" && APP_BIND_ADDR=127.0.0.1:3000 exec ./label-server) &
+          server_pid=$!
+
+          for attempt in {1..20}; do
+            if curl --fail --silent http://127.0.0.1:3000/healthz >/dev/null; then
+              break
+            fi
+            if [[ "$attempt" == 20 ]]; then
+              exit 1
+            fi
+            sleep 0.25
+          done
+          curl --fail --silent http://127.0.0.1:3000/ | grep --ignore-case '<!doctype html'
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/api/fonts)" = "200"
+
+      - name: Keep workflow artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}
+            ${{ matrix.artifact }}.sha256
+
+      - name: Attach to the GitHub Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ matrix.artifact }}
+            ${{ matrix.artifact }}.sha256

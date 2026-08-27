@@ -19,7 +19,34 @@ this project is licensed under the GPLv3 (see [License](#license)).
 - Permission to open the USB device (membership in the `lp` group is enough on most Linux
   distributions; macOS needs nothing extra)
 
-## Quick start
+## Install
+
+Each [GitHub Release](https://github.com/miyabi-sunny-side/label-server/releases) carries one
+self-contained binary per platform plus its checksum:
+
+| Asset                        | Platform                    |
+| ---------------------------- | --------------------------- |
+| `label-server-linux-x86_64`  | Linux, x86_64 (glibc)       |
+| `label-server-macos-aarch64` | macOS, Apple Silicon        |
+
+```sh
+curl -LO https://github.com/miyabi-sunny-side/label-server/releases/latest/download/label-server-linux-x86_64
+curl -LO https://github.com/miyabi-sunny-side/label-server/releases/latest/download/label-server-linux-x86_64.sha256
+sha256sum -c label-server-linux-x86_64.sha256
+chmod +x label-server-linux-x86_64
+./label-server-linux-x86_64
+```
+
+On macOS use `shasum -a 256 -c` for the checksum. The binaries are **not code-signed**: after
+verifying the checksum, clear the quarantine flag once so Gatekeeper lets it run —
+`xattr -d com.apple.quarantine label-server-macos-aarch64`. The macOS build is produced by the
+release workflow but has not yet been exercised against a printer on a Mac.
+
+Releases are cut by pushing a `v*.*.*` tag; the `Release` workflow builds both binaries natively,
+smoke-tests each from an empty directory, and attaches them. Running the workflow manually keeps
+the binaries as workflow artifacts without creating a release.
+
+## Quick start (from source)
 
 ```sh
 cd client
@@ -122,7 +149,7 @@ the USB protocol against a recording `Transport`. The renderer tests use the emb
 
 ```text
 .
-├── .github/workflows/  # Continuous integration
+├── .github/workflows/  # Continuous integration and the tag-driven release
 ├── client/             # Svelte 5 page, Vite config, tests, and the npm lockfile
 ├── src/                # Axum router, PT-P700 protocol (ptouch.rs), text renderer (render.rs)
 ├── fonts/              # BIZ UDPGothic (OFL) embedded into the binary
