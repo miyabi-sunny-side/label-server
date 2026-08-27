@@ -74,6 +74,7 @@ All label options are shared by printing and previewing:
 | `offset_percent`     | `5`                | Blank tape kept on each edge, as % of the tape width (0–49).         |
 | `font`               | catalog default    | A font id from `GET /api/fonts`.                                     |
 | `font_scale_percent` | `100`              | Shrinks the auto-fitted font size (10–100).                          |
+| `align`              | `left`             | Placement of shorter lines: `left`, `center` or `right`.             |
 
 - `POST /api/print` with `{"text": "line 1\nline 2", ...}` — prints one label on the loaded tape
   with the blank leader pre-cut. Returns `200 {"output": "printed <w>x<h>px on <n>mm tape"}` on

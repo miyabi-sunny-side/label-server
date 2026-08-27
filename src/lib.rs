@@ -47,6 +47,8 @@ pub struct PrintJob {
     pub font: Option<String>,
     /// Shrinks the auto-fitted size; 100 keeps it.
     pub font_scale_percent: u8,
+    /// Placement of shorter lines when there are several.
+    pub align: render::Align,
 }
 
 /// The font shipped inside the binary: `BIZ UDPGothic` Regular (Morisawa,
@@ -169,7 +171,8 @@ pub fn render_job(
         .map_err(|id| format!("unknown font: {id}"))?;
     let lines: Vec<&str> = job.lines.iter().map(String::as_str).collect();
     let height = print_height(tape_px, job.offset_percent);
-    render::render_lines(font, &lines, height, job.font_scale_percent).map_err(|e| e.to_string())
+    render::render_lines(font, &lines, height, job.font_scale_percent, job.align)
+        .map_err(|e| e.to_string())
 }
 
 /// Tape length a bitmap occupies, before the printer's own leader and
@@ -246,6 +249,8 @@ struct PrintRequest {
     offset_percent: Option<i64>,
     font: Option<String>,
     font_scale_percent: Option<i64>,
+    /// `left` (default), `center` or `right`.
+    align: Option<String>,
     /// Preview only: the tape to assume.
     tape_mm: Option<i64>,
 }
@@ -370,11 +375,17 @@ fn job_from(request: &PrintRequest) -> Result<PrintJob, String> {
         100,
         "font_scale_percent",
     )?;
+    let align = match request.align.as_deref() {
+        None => render::Align::default(),
+        Some(value) => render::Align::parse(value)
+            .ok_or_else(|| format!("align must be left, center or right, got {value}"))?,
+    };
     Ok(PrintJob {
         lines,
         offset_percent,
         font: request.font.clone(),
         font_scale_percent,
+        align,
     })
 }
 
@@ -547,6 +558,7 @@ mod tests {
                 offset_percent: 5,
                 font: None,
                 font_scale_percent: 100,
+                align: crate::render::Align::Left,
             }]
         );
     }
@@ -608,6 +620,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn alignment_reaches_the_printer_and_bad_values_are_rejected() {
+        let printer = Arc::new(FakePrinter::default());
+
+        let response = app(printer.clone(), catalog())
+            .oneshot(json_request(
+                &serde_json::json!({ "text": "abc\nd", "align": "center" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            printer.jobs.lock().unwrap()[0].align,
+            crate::render::Align::Center
+        );
+
+        let response = app(printer.clone(), catalog())
+            .oneshot(json_request(
+                &serde_json::json!({ "text": "abc", "align": "justify" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(body_string(response).await.contains("align must be"));
+        assert_eq!(printer.jobs.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn fonts_endpoint_lists_the_catalog_with_its_default() {
         let response = app(Arc::new(FakePrinter::default()), catalog())
             .oneshot(
@@ -653,6 +692,7 @@ mod tests {
                 offset_percent: 5,
                 font: None,
                 font_scale_percent: 100,
+                align: crate::render::Align::Left,
             },
             76,
         )

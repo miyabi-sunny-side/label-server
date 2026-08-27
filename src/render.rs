@@ -63,6 +63,28 @@ impl fmt::Display for RenderError {
 
 impl std::error::Error for RenderError {}
 
+/// Horizontal placement of shorter lines inside the label width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Align {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+impl Align {
+    /// Parses the API spelling.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "left" => Some(Self::Left),
+            "center" => Some(Self::Center),
+            "right" => Some(Self::Right),
+            _ => None,
+        }
+    }
+}
+
 const MIN_SCALE: u32 = 4;
 /// Coverage above which an anti-aliased sample becomes ink.
 const INK_THRESHOLD: f32 = 0.5;
@@ -133,7 +155,8 @@ fn find_scale<F: Font>(font: &F, text: &str, want_px: usize) -> Option<u32> {
 
 /// Renders `lines` stacked top to bottom into a bitmap `print_height` px
 /// tall, using the largest font size at which every line fits its slot,
-/// shrunk to `scale_percent` of that size (100 keeps it).
+/// shrunk to `scale_percent` of that size (100 keeps it). Lines narrower
+/// than the widest one are placed according to `align`.
 ///
 /// # Errors
 /// Returns [`RenderError::NoLines`] for an empty slice and
@@ -143,6 +166,7 @@ pub fn render_lines<F: Font>(
     lines: &[&str],
     print_height: usize,
     scale_percent: u8,
+    align: Align,
 ) -> Result<Bitmap, RenderError> {
     if lines.is_empty() {
         return Err(RenderError::NoLines);
@@ -187,7 +211,14 @@ pub fn render_lines<F: Font>(
         // bottom of this line's ink slot, centred in the remaining slack.
         let top = i * slot + (unused / lines.len()) / 2;
         let baseline = top as f32 + max_height as f32 - (line.bounds.3.max(0.0));
-        let shift_x = -line.bounds.0;
+        // ptouch-print's align_ofs: slack between this line and the widest one
+        let slack = (width as f32 - (line.bounds.1 - line.bounds.0)).max(0.0);
+        let align_offset = match align {
+            Align::Left => 0.0,
+            Align::Center => (slack / 2.0).floor(),
+            Align::Right => slack.floor(),
+        };
+        let shift_x = -line.bounds.0 + align_offset;
         for glyph in &line.glyphs {
             let Some(outlined) = font.outline_glyph(glyph.clone()) else {
                 continue;
@@ -237,7 +268,7 @@ pub fn encode_png(bitmap: &Bitmap) -> Result<Vec<u8>, String> {
 mod tests {
     use ab_glyph::FontVec;
 
-    use super::{Bitmap, encode_png, render_lines};
+    use super::{Align, Bitmap, encode_png, render_lines};
 
     fn font() -> FontVec {
         FontVec::try_from_vec(crate::EMBEDDED_FONT.to_vec()).unwrap()
@@ -251,7 +282,7 @@ mod tests {
 
     #[test]
     fn a_single_line_fills_the_tape_height() {
-        let bitmap = render_lines(&font(), &["abc"], 76, 100).unwrap();
+        let bitmap = render_lines(&font(), &["abc"], 76, 100, Align::Left).unwrap();
 
         assert_eq!(bitmap.height, 76);
         assert!(bitmap.width > 0);
@@ -263,7 +294,7 @@ mod tests {
 
     #[test]
     fn two_lines_each_stay_inside_their_half() {
-        let bitmap = render_lines(&font(), &["abc", "abc"], 76, 100).unwrap();
+        let bitmap = render_lines(&font(), &["abc", "abc"], 76, 100, Align::Left).unwrap();
 
         assert_eq!(bitmap.height, 76);
         let rows = ink_rows(&bitmap);
@@ -279,8 +310,8 @@ mod tests {
 
     #[test]
     fn a_smaller_print_height_yields_a_shorter_label() {
-        let full = render_lines(&font(), &["Gridfinity"], 76, 100).unwrap();
-        let inset = render_lines(&font(), &["Gridfinity"], 68, 100).unwrap();
+        let full = render_lines(&font(), &["Gridfinity"], 76, 100, Align::Left).unwrap();
+        let inset = render_lines(&font(), &["Gridfinity"], 68, 100, Align::Left).unwrap();
 
         assert_eq!(inset.height, 68);
         assert!(inset.width < full.width, "{} < {}", inset.width, full.width);
@@ -289,8 +320,8 @@ mod tests {
 
     #[test]
     fn a_scale_below_full_shrinks_the_glyphs() {
-        let full = render_lines(&font(), &["Gridfinity"], 76, 100).unwrap();
-        let half = render_lines(&font(), &["Gridfinity"], 76, 50).unwrap();
+        let full = render_lines(&font(), &["Gridfinity"], 76, 100, Align::Left).unwrap();
+        let half = render_lines(&font(), &["Gridfinity"], 76, 50, Align::Left).unwrap();
 
         let span = |b: &Bitmap| {
             let rows = ink_rows(b);
@@ -317,15 +348,49 @@ mod tests {
         assert_eq!(&buf[..2], &[0xff, 0x00]);
     }
 
+    /// Leftmost and rightmost inked columns within rows `rows`.
+    fn ink_span(bitmap: &Bitmap, rows: std::ops::Range<usize>) -> (usize, usize) {
+        let cols: Vec<usize> = (0..bitmap.width)
+            .filter(|&x| rows.clone().any(|y| bitmap.get(x, y)))
+            .collect();
+        (*cols.first().unwrap(), *cols.last().unwrap())
+    }
+
+    #[test]
+    fn shorter_lines_follow_the_requested_alignment() {
+        let lines = ["Gridfinity", "M3"];
+        let left = render_lines(&font(), &lines, 76, 100, Align::Left).unwrap();
+        let center = render_lines(&font(), &lines, 76, 100, Align::Center).unwrap();
+        let right = render_lines(&font(), &lines, 76, 100, Align::Right).unwrap();
+
+        // the long line fixes the width; the short line moves
+        assert_eq!(left.width, center.width);
+        assert_eq!(left.width, right.width);
+        let (l0, _) = ink_span(&left, 38..76);
+        let (c0, c1) = ink_span(&center, 38..76);
+        let (_, r1) = ink_span(&right, 38..76);
+        // glyph bounds are fractional, so edges may sit 1px inside
+        assert!(l0 <= 1, "{l0}");
+        assert!(right.width - 1 - r1 <= 1, "{r1} of {}", right.width);
+        let left_gap = c0;
+        let right_gap = center.width - 1 - c1;
+        assert!(
+            left_gap.abs_diff(right_gap) <= 1,
+            "{left_gap} vs {right_gap}"
+        );
+        // the long line itself does not move
+        assert_eq!(ink_span(&left, 0..38), ink_span(&right, 0..38));
+    }
+
     #[test]
     fn japanese_text_produces_ink() {
-        let bitmap = render_lines(&font(), &["ラベル"], 128, 100).unwrap();
+        let bitmap = render_lines(&font(), &["ラベル"], 128, 100, Align::Left).unwrap();
         assert!(!ink_rows(&bitmap).is_empty());
     }
 
     #[test]
     fn blank_lines_keep_their_slot() {
-        let bitmap = render_lines(&font(), &["abc", "", "abc"], 128, 100).unwrap();
+        let bitmap = render_lines(&font(), &["abc", "", "abc"], 128, 100, Align::Left).unwrap();
         let rows = ink_rows(&bitmap);
         assert!(rows.iter().any(|&y| y < 42));
         assert!(!rows.iter().any(|&y| (45..83).contains(&y)));

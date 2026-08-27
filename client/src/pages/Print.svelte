@@ -4,6 +4,7 @@
     fetchFonts,
     postPreview,
     postPrint,
+    type Align,
     type Preview,
     type PrintOptions,
   } from "../lib/api";
@@ -20,6 +21,7 @@
   let fontScalePercent = $state(100);
   let font = $state<string | null>(null);
   let fonts = $state<string[]>([]);
+  let align = $state<Align>("left");
 
   let printState = $state<PrintState>("idle");
   let errorMessage = $state("");
@@ -33,6 +35,7 @@
     offset_percent: offsetPercent,
     font,
     font_scale_percent: fontScalePercent,
+    align,
   });
 
   $effect(() => {
@@ -127,6 +130,18 @@
       </select>
     </label>
     <label class="field">
+      <span class="caption">揃え</span>
+      <select
+        class="input"
+        bind:value={align}
+        disabled={printState === "printing"}
+      >
+        <option value="left">左寄せ</option>
+        <option value="center">中央寄せ</option>
+        <option value="right">右寄せ</option>
+      </select>
+    </label>
+    <label class="field">
       <span class="caption">オフセット (%)</span>
       <input
         class="input"
@@ -211,7 +226,7 @@
 
   .settings
     display: grid
-    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr)
+    grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr))
     gap: var(--sp-3)
 
   @media (max-width: 767px)

@@ -1,8 +1,11 @@
+export type Align = "left" | "center" | "right";
+
 export interface PrintOptions {
   text: string;
   offset_percent: number;
   font: string | null;
   font_scale_percent: number;
+  align: Align;
 }
 
 export interface PrintResult {
@@ -43,6 +46,7 @@ function body(options: PrintOptions) {
     offset_percent: options.offset_percent,
     font: options.font ?? undefined,
     font_scale_percent: options.font_scale_percent,
+    align: options.align,
   };
 }
 

@@ -95,6 +95,10 @@ describe("Print", () => {
         }) as HTMLInputElement
       ).value,
     ).toBe("100");
+    expect(
+      (screen.getByRole("combobox", { name: "揃え" }) as HTMLSelectElement)
+        .value,
+    ).toBe("left");
   });
 
   it("previews the label after typing and reports the tape length", async () => {
@@ -128,6 +132,7 @@ describe("Print", () => {
       offset_percent: 10,
       font: "NotoSansCJK-Regular",
       font_scale_percent: 100,
+      align: "left",
       tape_mm: 12,
     });
     const img = screen.getByRole("img", {
@@ -223,6 +228,9 @@ describe("Print", () => {
         target: { value: "70" },
       },
     );
+    await fireEvent.change(screen.getByRole("combobox", { name: "揃え" }), {
+      target: { value: "center" },
+    });
     const button = screen.getByRole("button", { name: "印刷" });
     await fireEvent.click(button);
     await fireEvent.click(button);
@@ -236,6 +244,7 @@ describe("Print", () => {
       offset_percent: 5,
       font: "BIZUDPGothic-Regular",
       font_scale_percent: 70,
+      align: "center",
     });
 
     pending.resolve(json({ output: "printed" }));

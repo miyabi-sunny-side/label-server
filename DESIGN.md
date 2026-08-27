@@ -173,7 +173,8 @@ depends on nothing outside this repository.
   line; leading and trailing blank lines are dropped, inner blank lines
   are kept. Blank text is not printable.
 - **Print options** — font (one of the server's catalog, default
-  preselected), offset (% of the tape width kept blank on each edge,
+  preselected), 揃え (left / center / right placement of shorter lines,
+  default 左寄せ), offset (% of the tape width kept blank on each edge,
   0–49, default 5) and 文字サイズ (% of the auto-fitted size, 10–100,
   default 100). The same options go to the preview and to the print.
 - **Preview** — the server renders the exact bitmap it would print, for
@@ -283,8 +284,9 @@ internally when a label is wider than the column.
 
 Spacing snaps to the 4px scale `--sp-1..5` (4/8/12/16/24px). The form
 stacks its rows with `--sp-3` gaps; caption-to-field is `--sp-1`; the
-settings row is a grid (font 2fr, offset 1fr, size 1fr; below 768px the
-font spans a full row above the two numbers) with `--sp-3` gaps; the
+settings row is a grid (font 2fr, then 揃え / offset / size 1fr each;
+below 768px the font spans a full row and the other three flow in two
+columns) with `--sp-3` gaps; the
 action row lays out button and status with `--sp-3`. No off-scale
 values.
 
@@ -364,10 +366,11 @@ entry.
     sm radius, 8px padding, body type, 4 visible rows, vertical resize
     only; focus swaps the border to accent under the shared focus ring).
     Placeholder reads 改行で複数行になります.
-  - _settings row:_ three labelled inputs in the input recipe — フォント
-    (`<select>` listing the catalog ids, default preselected),
-    オフセット (%) (`type="number"` 0–49) and 文字サイズ (%)
-    (`type="number"` 10–100). Every change re-renders the preview.
+  - _settings row:_ four labelled inputs in the input recipe — フォント
+    (`<select>` listing the catalog ids, default preselected), 揃え
+    (`<select>` 左寄せ / 中央寄せ / 右寄せ), オフセット (%)
+    (`type="number"` 0–49) and 文字サイズ (%) (`type="number"` 10–100).
+    Every change re-renders the preview.
   - _preview:_ caption プレビュー (12mm テープ想定), then the tape strip
     (tape-preview recipe: surface-raised bg, 1px hairline, sm radius, 8px
     padding, min-height 76px, horizontal scroll) carrying
