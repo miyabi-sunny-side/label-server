@@ -9,6 +9,7 @@
     "moon",
     "monitor",
     "chevron-left",
+    "chevron-down",
     "trash",
     "megaphone",
     "megaphone-off",
@@ -65,6 +66,8 @@
     <line x1="12" y1="17" x2="12" y2="21" />
   {:else if name === "chevron-left"}
     <polyline points="15 18 9 12 15 6" />
+  {:else if name === "chevron-down"}
+    <polyline points="6 9 12 15 18 9" />
   {:else if name === "trash"}
     <polyline points="3 6 5 6 21 6" />
     <path

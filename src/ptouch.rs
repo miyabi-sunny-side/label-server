@@ -9,6 +9,15 @@ use std::{fmt, thread, time::Duration};
 
 use crate::render::Bitmap;
 
+/// Print resolution of the PT-P700, in dots per inch. Everything that
+/// turns millimetres into dots goes through here.
+pub const DPI: f64 = 180.0;
+/// Feed the printer accepts around a label, in millimetres. Brother's
+/// raster reference gives 2mm (14 dots) as the smallest and 127mm as the
+/// largest; 0 is outside the specification.
+pub const MIN_MARGIN_MM: u8 = 2;
+pub const MAX_MARGIN_MM: u8 = 127;
+
 /// Width of the PT-P700 print head in pixels.
 pub const MAX_PX: usize = 128;
 const BYTES_PER_LINE: usize = MAX_PX / 8;
@@ -35,11 +44,16 @@ pub const PACKBITS_ENABLE: [u8; 2] = [0x4d, 0x02];
 pub const RASTER_MODE: [u8; 4] = [0x1b, 0x69, 0x61, 0x01];
 /// `ESC i M 40` — cut the blank leader before printing.
 pub const PRECUT: [u8; 4] = [0x1b, 0x69, 0x4d, 0x40];
-/// `ESC i d 23 00` — feed 35 dots before and after the label. The P700
-/// prints at 180dpi, so 35 dots is 35 * 25.4 / 180 = 4.94mm, the nearest
-/// dot to the 5mm that leaves enough tape to cut comfortably. This is on
-/// top of the ~24.3mm leader the cutter position forces.
-pub const MARGIN: [u8; 5] = [0x1b, 0x69, 0x64, 0x23, 0x00];
+/// `ESC i d n1 n2` — feed this many millimetres before and after the
+/// label, sent as dots with the low byte first. 127mm is 900 dots, so
+/// the count does not fit in one byte. This feed is on top of the
+/// ~24.3mm leader the cutter position forces at the start of a job.
+#[must_use]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+pub fn margin_command(mm: u8) -> [u8; 5] {
+    let dots = (f64::from(mm) * DPI / 25.4).round() as u16;
+    [0x1b, 0x69, 0x64, (dots & 0xff) as u8, (dots >> 8) as u8]
+}
 /// `FF` — ends a page that is not the last one of the job. The printer
 /// cuts it and keeps the job open, so the next label follows without a
 /// fresh leader.
@@ -205,7 +219,12 @@ fn raster_packet(bitmap: &Bitmap, column: usize, offset: usize) -> Vec<u8> {
 /// Returns the transport or status error, whatever `make_bitmaps`
 /// returned (as [`Error::Render`]), or [`Error::TooTall`] when a bitmap
 /// does not fit the loaded tape.
-pub fn print<T, F>(transport: &mut T, precut: bool, make_bitmaps: F) -> Result<Status, Error>
+pub fn print<T, F>(
+    transport: &mut T,
+    precut: bool,
+    margin_mm: u8,
+    make_bitmaps: F,
+) -> Result<Status, Error>
 where
     T: Transport,
     F: FnOnce(&Status) -> Result<Vec<Bitmap>, String>,
@@ -231,7 +250,7 @@ where
         if precut {
             transport.write(&PRECUT)?;
         }
-        transport.write(&MARGIN)?;
+        transport.write(&margin_command(margin_mm))?;
         let offset = (MAX_PX - bitmap.height) / 2;
         for column in 0..bitmap.width {
             transport.write(&raster_packet(bitmap, column, offset))?;
@@ -313,7 +332,7 @@ impl Drop for UsbTransport {
 mod tests {
     use std::cell::RefCell;
 
-    use super::{Error, PRECUT, Transport, parse_status, print, tape_width_px};
+    use super::{Error, PRECUT, Transport, margin_command, parse_status, print, tape_width_px};
     use crate::render::Bitmap;
 
     /// Records every bulk write and answers status reads with a canned frame.
@@ -392,7 +411,7 @@ mod tests {
         bitmap.set(1, 0);
 
         let mut seen_status = None;
-        let status = print(&mut &transport, true, |status| {
+        let status = print(&mut &transport, true, 2, |status| {
             seen_status = Some(*status);
             Ok(vec![bitmap.clone()])
         })
@@ -408,9 +427,10 @@ mod tests {
         assert_eq!(writes[2], [0x4d, 0x02]);
         assert_eq!(writes[3], [0x1b, 0x69, 0x61, 0x01]);
         assert_eq!(writes[4], [0x1b, 0x69, 0x4d, 0x40]);
-        // ESC i d 23 00: 0x23 = 35 dots of feed before and after the label,
-        // which is 35 * 25.4 / 180 = 4.94mm at the P700's 180dpi.
-        assert_eq!(writes[5], [0x1b, 0x69, 0x64, 0x23, 0x00]);
+        // ESC i d 0E 00: 2mm of feed before and after the label. At the
+        // P700's 180dpi that is 2 * 180 / 25.4 = 14.17 -> 14 dots, and
+        // 14 fits in the low byte so the high one stays 0.
+        assert_eq!(writes[5], [0x1b, 0x69, 0x64, 0x0e, 0x00]);
         // Golden raster packets from the ptouch-print protocol: 'G', 17, 0, 15
         // then 16 bytes. A 4px image sits at bits 62..=65 of the 128px head;
         // rows go out bottom-up and rasterline_setpixel stores pixel p at
@@ -441,7 +461,7 @@ mod tests {
     fn printing_refuses_a_bitmap_taller_than_the_tape() {
         let transport = FakeTransport::with_media(12);
 
-        let err = print(&mut &transport, true, |_| Ok(vec![Bitmap::new(1, 77)])).unwrap_err();
+        let err = print(&mut &transport, true, 2, |_| Ok(vec![Bitmap::new(1, 77)])).unwrap_err();
         assert!(matches!(
             err,
             Error::TooTall {
@@ -457,7 +477,7 @@ mod tests {
     fn a_render_failure_stops_before_any_raster_data() {
         let transport = FakeTransport::with_media(12);
 
-        let err = print(&mut &transport, true, |_| Err("no glyphs".to_owned())).unwrap_err();
+        let err = print(&mut &transport, true, 2, |_| Err("no glyphs".to_owned())).unwrap_err();
         assert!(matches!(err, Error::Render(ref m) if m == "no glyphs"));
         assert_eq!(transport.writes.borrow().len(), 2);
     }
@@ -473,7 +493,7 @@ mod tests {
         let mut second = Bitmap::new(1, 4);
         second.set(0, 1);
 
-        print(&mut &transport, true, |_| {
+        print(&mut &transport, true, 2, |_| {
             Ok(vec![first.clone(), second.clone()])
         })
         .unwrap();
@@ -489,7 +509,7 @@ mod tests {
         // the page ends and is cut, but the job stays open.
         assert_eq!(writes[3], [0x1b, 0x69, 0x61, 0x01]);
         assert_eq!(writes[4], [0x1b, 0x69, 0x4d, 0x40]);
-        assert_eq!(writes[5], [0x1b, 0x69, 0x64, 0x23, 0x00]);
+        assert_eq!(writes[5], [0x1b, 0x69, 0x64, 0x0e, 0x00]);
         assert_eq!(
             writes[6],
             [
@@ -511,7 +531,7 @@ mod tests {
         // row one below the top: bit 64 of the head, so byte 7 bit 0.
         assert_eq!(writes[9], [0x1b, 0x69, 0x61, 0x01]);
         assert_eq!(writes[10], [0x1b, 0x69, 0x4d, 0x40]);
-        assert_eq!(writes[11], [0x1b, 0x69, 0x64, 0x23, 0x00]);
+        assert_eq!(writes[11], [0x1b, 0x69, 0x64, 0x0e, 0x00]);
         assert_eq!(
             writes[12],
             [
@@ -528,15 +548,51 @@ mod tests {
     #[test]
     fn printing_nothing_at_all_is_rejected_before_any_raster_data() {
         let transport = FakeTransport::with_media(12);
-        let err = print(&mut &transport, true, |_| Ok(Vec::new())).unwrap_err();
+        let err = print(&mut &transport, true, 2, |_| Ok(Vec::new())).unwrap_err();
         assert!(matches!(err, Error::Render(ref m) if m == "no labels to print"));
         assert_eq!(transport.writes.borrow().len(), 2);
     }
 
     #[test]
+    fn the_margin_command_carries_the_feed_in_dots_low_byte_first() {
+        // Brother's range is 2mm..=127mm. At 180dpi one millimetre is
+        // 180 / 25.4 = 7.0866 dots, so the hand-computed ends are
+        // 2mm -> round(14.173) = 14 = 0x0e 0x00 and
+        // 127mm -> round(900.0) = 900 = 0x384 -> 0x84 0x03.
+        assert_eq!(margin_command(2), [0x1b, 0x69, 0x64, 0x0e, 0x00]);
+        assert_eq!(margin_command(127), [0x1b, 0x69, 0x64, 0x84, 0x03]);
+        // 5mm was the fixed value before the margin became a setting:
+        // round(35.433) = 35 = 0x23.
+        assert_eq!(margin_command(5), [0x1b, 0x69, 0x64, 0x23, 0x00]);
+        // 36mm crosses the byte boundary: round(255.118) = 255.
+        assert_eq!(margin_command(36), [0x1b, 0x69, 0x64, 0xff, 0x00]);
+        // 37mm is the first value that needs the high byte:
+        // round(262.205) = 262 = 0x106.
+        assert_eq!(margin_command(37), [0x1b, 0x69, 0x64, 0x06, 0x01]);
+    }
+
+    #[test]
+    fn a_wider_margin_reaches_every_page_of_the_job() {
+        let transport = FakeTransport::with_media(12);
+        print(&mut &transport, true, 37, |_| {
+            Ok(vec![Bitmap::new(1, 4), Bitmap::new(1, 4)])
+        })
+        .unwrap();
+
+        let margins: Vec<Vec<u8>> = transport
+            .writes
+            .borrow()
+            .iter()
+            .filter(|packet| packet.starts_with(&[0x1b, 0x69, 0x64]))
+            .cloned()
+            .collect();
+        assert_eq!(margins, [[0x1b, 0x69, 0x64, 0x06, 0x01]; 2]);
+    }
+
+    #[test]
     fn printing_without_precut_skips_the_precut_command() {
         let transport = FakeTransport::with_media(24);
-        print(&mut &transport, false, |_| Ok(vec![Bitmap::new(1, 1)])).unwrap();
+        print(&mut &transport, false, 2, |_| Ok(vec![Bitmap::new(1, 1)])).unwrap();
         assert!(!transport.writes.borrow().contains(&PRECUT.to_vec()));
     }
 }

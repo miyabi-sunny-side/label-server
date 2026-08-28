@@ -5,6 +5,10 @@ serves the JSON API and the Svelte page (compiled into it), renders the text wit
 font, and talks to the printer over USB itself (libusb is linked statically) — no CUPS, no driver,
 no external tool, nothing to place next to the binary.
 
+In the browser only 文字サイズ is out in the open (it opens at 40%, which suits most labels);
+フォント・揃え・オフセット・余白 sit behind a 詳細 toggle, closed by default. Values you never
+touch are still sent, so a form you never expand prints with the defaults in the table below.
+
 There are two modes. **個別** (`/`) prints one label per press and shows a live preview. **連続**
 (`/continuous`) prints a whole list in a single job: the printer feeds its ~24mm leader once for
 the batch instead of once per label, so a run of ten labels wastes one leader instead of ten. A
@@ -14,6 +18,17 @@ header word can be prefixed to every line — 「M4」 over 皿8 / 皿10 prints 
 The USB protocol and the text layout rules are a Rust port of
 [ptouch-print](https://codeberg.org/askaaron/ptouch-print) by Dominic Radermacher, which is why
 this project is licensed under the GPLv3 (see [License](#license)).
+
+## The blank 24mm leader
+
+Every job starts with about 24mm of blank tape, and nothing in software removes it. The PT-P700's
+cutter sits ahead of the print head, so the tape between them is already past the head when
+printing starts — it can only come out blank. `margin_mm` controls the feed around each label, not
+this leader.
+
+What it costs is one blank strip **per job**, not per label. That is what 連続 mode is for: ten
+labels sent as one job waste one leader, while ten separate presses waste ten. If you are printing
+a batch, put the lines in 連続 and press once.
 
 ## Prerequisites
 
@@ -81,6 +96,7 @@ All label options are shared by printing and previewing:
 | `font`               | catalog default    | A font id from `GET /api/fonts`.                                     |
 | `font_scale_percent` | `100`              | Shrinks the auto-fitted font size (10–100).                          |
 | `align`              | `left`             | Placement of shorter lines: `left`, `center` or `right`.             |
+| `margin_mm`          | `2`                | Tape fed before and after every label (2–127). 2mm is the printer's minimum. |
 
 - `POST /api/print` with `{"text": "line 1\nline 2", ...}` — prints one label on the loaded tape
   with the blank leader pre-cut. Returns `200 {"output": "printed <w>x<h>px on <n>mm tape"}` on

@@ -17,6 +17,8 @@ const STAR_POINTS =
 // geometry, deliberately replacing agent-talkd's smaller custom envelope
 // to keep every icon at the same optical size.
 const ADOPTED_SHAPES: Record<string, Shape[]> = {
+  // Lucide's chevron-down, the mirror of the chevron-left already here.
+  "chevron-down": [{ tag: "polyline", attrs: { points: "6 9 12 15 18 9" } }],
   trash: [
     { tag: "polyline", attrs: { points: "3 6 5 6 21 6" } },
     {

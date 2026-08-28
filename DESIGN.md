@@ -128,6 +128,11 @@ components:
   radio-selected:
     backgroundColor: "{colors.accent-subtle}"
     rounded: "{rounded.sm}"
+  details-panel:
+    backgroundColor: "{colors.surface-raised}"
+    textColor: "{colors.on-surface}"
+    rounded: "{rounded.sm}"
+    padding: 12px
   mode-tab:
     backgroundColor: "{colors.wash-base}"
     textColor: "{colors.muted}"
@@ -203,11 +208,20 @@ depends on nothing outside this repository.
   (改行 / 半角スペース / 無し) prefix every label, so 「M4」+ 半角スペース
   over 皿8 / 皿10 prints 「M4 皿8」 and 「M4 皿10」. The server owns the
   joining rule; the UI only says how many labels the job will print.
-- **Print options** — font (one of the server's catalog, default
-  preselected), 揃え (left / center / right placement of shorter lines,
-  default 左寄せ), offset (% of the tape width kept blank on each edge,
-  0–49, default 5) and 文字サイズ (% of the auto-fitted size, 10–100,
-  default 100). The same options go to the preview and to the print.
+- **Print options** — five, shared by both modes and by the preview:
+  font (one of the server's catalog, default preselected), 揃え (left /
+  center / right placement of shorter lines, default 左寄せ), offset (%
+  of the tape width kept blank on each edge, 0–49, default 5), 余白 (mm
+  of tape the printer feeds before and after every label, 2–127, default
+  2) and 文字サイズ (% of the auto-fitted size, 10–100).
+  **文字サイズ is the only one worth reaching for on most prints**, so
+  the form opens it at 40 and keeps the other four behind 詳細. The API
+  still defaults an omitted 文字サイズ to 100, so a scripted request is
+  unchanged by the form's choice.
+- **余白 is the printer's feed, not part of the label.** It is fed
+  outside the bitmap, so it never changes the rendered image, its pixel
+  size, or the mm length the preview reports. 2mm is the smallest the
+  hardware accepts.
 - **Preview** — the server renders the exact bitmap it would print, for
   an assumed 12mm tape, and the UI shows it 1:1 with the tape length it
   occupies (before the printer's leader and cut margins). It refreshes
@@ -359,10 +373,11 @@ stroke-linecap="round" stroke-linejoin="round"` (Lucide style), default
 size `1.2em`, baseline-aligned, inheriting the text color of its context.
 
 The dictionary was copied whole from the family template and is kept
-whole: `menu`, `x`, `sun`, `moon`, `monitor`, `chevron-left`, `trash`,
-`megaphone`, `megaphone-off`, `pencil`, `refresh-cw`, `check-check`,
-`mail`, `book`, `search`, `star`, `star-filled`. Only `menu`, `x`,
-`sun`, `moon`, `monitor` are used today; the rest stay as vocabulary.
+whole: `menu`, `x`, `sun`, `moon`, `monitor`, `chevron-left`,
+`chevron-down`, `trash`, `megaphone`, `megaphone-off`, `pencil`,
+`refresh-cw`, `check-check`, `mail`, `book`, `search`, `star`,
+`star-filled`. Only `menu`, `x`, `sun`, `moon`, `monitor` and
+`chevron-down` are used today; the rest stay as vocabulary.
 `Icon.svelte` also exports `ICON_NAMES`, the canonical array of every
 entry.
 
@@ -411,11 +426,11 @@ entry.
     sm radius, 8px padding, body type, 4 visible rows, vertical resize
     only; focus swaps the border to accent under the shared focus ring).
     Placeholder reads 改行で複数行になります.
-  - _settings row:_ four labelled inputs in the input recipe — フォント
-    (`<select>` listing the catalog ids, default preselected), 揃え
-    (`<select>` 左寄せ / 中央寄せ / 右寄せ), オフセット (%)
-    (`type="number"` 0–49) and 文字サイズ (%) (`type="number"` 10–100).
-    Every change re-renders the preview.
+  - _settings row:_ 文字サイズ (%) (`type="number"` 10–100, opens at
+    40, capped at 160px wide) beside the 詳細 toggle. Every change
+    re-renders the preview.
+  - _詳細 panel:_ see **Settings** below. Every change inside it
+    re-renders the preview too.
   - _preview:_ caption プレビュー (12mm テープ想定), then the tape strip
     (tape-preview recipe: surface-raised bg, 1px hairline, sm radius, 8px
     padding, min-height 76px, horizontal scroll) carrying
@@ -424,7 +439,9 @@ entry.
     + 描画中…; _ready_ the rendered label as an `<img alt="ラベルのプレビュー">`
     at 1 CSS px per printed px on a white label ground; _error_ the
     server's message in danger. Below a ready preview a caption reads
-    長さ 約 N mm (W px、裁断前・機械の余白を除く).
+    長さ 約 N mm (W px、裁断前・機械の余白を除く) — the 余白 setting is
+    the machine feed the caption excludes, so changing it must leave both
+    the image and this number untouched.
   - _action row:_ the primary button 印刷 (`type="submit"`, accent bg,
     surface-raised text) followed by the status slot. Enter inside the
     textarea inserts a newline; the button is the only way to submit.
@@ -448,8 +465,8 @@ entry.
     半角スペース). Below 768px they stack.
   - _field:_ the caption ラベルの文字 and a 6-row textarea in the same
     input recipe as 個別, placeholder 改行ごとに別のラベルになります.
-  - _settings row:_ the same four inputs as 個別, from one shared
-    component — the two modes never drift apart.
+  - _settings row and 詳細 panel:_ the same shared component as 個別,
+    with the same defaults — the two modes never drift apart.
   - _action row:_ the primary button 印刷 followed by a muted
     「N 枚」 count that tracks the non-blank lines, then the status
     slot. The button is disabled while the count is 0 — a job of no
@@ -459,6 +476,23 @@ entry.
     keeps the text; error shows the printer's message verbatim in the
     banner). There is **no preview** — one strip cannot honestly stand
     for a batch.
+- **Settings (shared by both modes):** one component, so the two forms
+  cannot drift apart. 文字サイズ (%) sits in the open next to a 詳細
+  toggle — a default button carrying `aria-expanded` and
+  `aria-controls`, with the `chevron-down` dictionary icon that flips to
+  point up when open. Opening reveals the details panel below the row:
+  surface-raised background, 1px hairline, sm radius, `--sp-3` padding,
+  the same 2fr/1fr/1fr/1fr grid the settings row used to be (two columns
+  below 768px) holding フォント (`<select>`), 揃え (`<select>`),
+  オフセット (%) (0–49) and 余白 (mm) (2–127). **No shadow** — the panel
+  is a tonal layer, not a floating surface — and **no open/close
+  animation**; it is a disclosure, not a transition.
+  - _Closed by default_, on both pages and on every load. The state is
+    not persisted: it is a per-visit convenience, not a preference.
+  - **The values live in the page, never in the panel's markup.** A form
+    whose 詳細 was never opened still sends all five options, and a value
+    changed inside the panel survives closing it. This is the invariant
+    that keeps the accordion from becoming a way to lose settings.
 - **Buttons:** default = surface-raised bg, 1px hairline, label type,
   sm radius, 8×14px padding, hover fills `--c-hover-1`. Primary =
   accent bg, `surface-raised`-token text — 印刷 is the only one.
@@ -499,8 +533,10 @@ entry.
   (auto) leaves the attribute off. `Icon.svelte` is the sole icon
   source.
 - The 個別 form is `client/src/pages/Print.svelte` and the 連続 form is
-  `client/src/pages/Continuous.svelte`; the settings row both use is
-  `client/src/lib/Settings.svelte`. Requests go through
+  `client/src/pages/Continuous.svelte`; the settings row and 詳細 panel
+  both use is `client/src/lib/Settings.svelte`. Each page owns the five
+  option values as `$state` and passes them in with `bind:`, which is
+  what makes a closed panel harmless. Requests go through
   `client/src/lib/api.ts` (`/api/fonts`, `/api/preview`, `/api/print`,
   `/api/print/continuous`).
 - Routing is `client/src/lib/routes.ts` (the pattern table) and
@@ -534,8 +570,16 @@ entry.
   4a. On the 連続 page, three non-blank lines show 「3 枚」 and one
      press sends exactly one `POST /api/print/continuous` whose
      `bodies` are those three lines, whose `headers` repeat the header
-     word, and whose settings match the four inputs. With no non-blank
+     word, and whose settings match the five options. With no non-blank
      line the 印刷 button is disabled.
+  4c. On first load of either page, 詳細 reads `aria-expanded="false"`,
+     文字サイズ shows 40, and フォント / 揃え / オフセット / 余白 are
+     absent from the DOM. Printing without ever opening 詳細 still sends
+     `font_scale_percent: 40`, `margin_mm: 2`, `offset_percent: 5` and
+     `align: "left"`. A 余白 changed inside the panel is still sent
+     after the panel is closed.
+  4d. Changing 余白 leaves the preview `<img>` dimensions and the mm
+     caption unchanged — the feed is the printer's, not the label's.
   4b. Typing text then pausing 300ms sends one `POST /api/preview`; the
      strip's `data-preview` reaches `ready`, the `<img>` height equals
      the returned `height_px`, and the caption states the mm length.
@@ -564,7 +608,12 @@ entry.
   don't move it into the hamburger menu and don't reimplement it as
   buttons that only work with JavaScript.
 - Do give both modes the same settings component; don't let the two
-  forms grow separate copies of the same four inputs.
+  forms grow separate copies of the same inputs.
+- Do keep the option values in the page and the 詳細 panel purely
+  presentational; don't let closing the panel drop a setting or stop it
+  from being sent.
+- Do treat 余白 as the printer's feed; don't draw it into the preview or
+  fold it into the reported mm length.
 - Don't use emoji or text glyphs as icons; every icon is an
   `Icon.svelte` dictionary entry.
 - Don't introduce font sizes, radii, spacing values, or shadows outside

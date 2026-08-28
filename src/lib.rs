@@ -35,8 +35,10 @@ pub const DEFAULT_FONT_SCALE_PERCENT: u8 = 100;
 pub const MIN_FONT_SCALE_PERCENT: u8 = 10;
 /// Tape assumed by previews when no printer has been asked.
 pub const DEFAULT_TAPE_MM: u8 = 12;
-/// PT-P700 print resolution.
-pub const DPI: f64 = 180.0;
+/// Feed left before and after a label when the request says nothing.
+/// This is the smallest the printer accepts, so a label wastes as little
+/// tape as it can while still being cuttable.
+pub const DEFAULT_MARGIN_MM: u8 = ptouch::MIN_MARGIN_MM;
 
 /// One print job: the labels it prints, in order, and the settings they
 /// all share. The individual mode sends a job of one label; the
@@ -47,6 +49,8 @@ pub struct PrintJob {
     /// One entry per label, each holding that label's lines.
     pub labels: Vec<Vec<String>>,
     pub offset_percent: u8,
+    /// Tape fed before and after every label of the job, in millimetres.
+    pub margin_mm: u8,
     /// Font id from [`FontCatalog`]; `None` selects the catalog default.
     pub font: Option<String>,
     /// Shrinks the auto-fitted size; 100 keeps it.
@@ -189,7 +193,7 @@ pub fn render_job(
 #[must_use]
 #[allow(clippy::cast_precision_loss)] // label widths are a few thousand px
 pub fn length_mm(width_px: usize) -> f64 {
-    (width_px as f64 * 25.4 / DPI * 10.0).round() / 10.0
+    (width_px as f64 * 25.4 / ptouch::DPI * 10.0).round() / 10.0
 }
 
 /// Pixels available for text once `offset_percent` of the tape width is
@@ -238,7 +242,7 @@ impl Printer for UsbPrinter {
     fn print(&self, job: &PrintJob) -> Result<String, String> {
         let mut transport = ptouch::UsbTransport::open().map_err(|e| e.to_string())?;
         let mut sizes = Vec::new();
-        let status = ptouch::print(&mut transport, true, |status| {
+        let status = ptouch::print(&mut transport, true, job.margin_mm, |status| {
             let bitmaps = render_job(&self.catalog, job, status.tape_px)?;
             sizes = bitmaps.iter().map(|b| (b.width, b.height)).collect();
             Ok(bitmaps)
@@ -267,6 +271,10 @@ struct PrintRequest {
     offset_percent: Option<i64>,
     font: Option<String>,
     font_scale_percent: Option<i64>,
+    /// Tape fed before and after the label (2..=127). The preview
+    /// validates it like the others but does not draw it: the feed is
+    /// the printer's, outside the bitmap.
+    margin_mm: Option<i64>,
     /// `left` (default), `center` or `right`.
     align: Option<String>,
     /// Preview only: the tape to assume.
@@ -286,6 +294,7 @@ struct ContinuousRequest {
     offset_percent: Option<i64>,
     font: Option<String>,
     font_scale_percent: Option<i64>,
+    margin_mm: Option<i64>,
     align: Option<String>,
 }
 
@@ -417,7 +426,7 @@ async fn api_fonts(State(state): State<AppState>) -> Json<FontsResponse> {
 }
 
 /// Validates an optional integer field into `min..=max`.
-fn percent(value: Option<i64>, default: u8, min: u8, max: u8, name: &str) -> Result<u8, String> {
+fn bounded(value: Option<i64>, default: u8, min: u8, max: u8, name: &str) -> Result<u8, String> {
     let Some(value) = value else {
         return Ok(default);
     };
@@ -427,50 +436,79 @@ fn percent(value: Option<i64>, default: u8, min: u8, max: u8, name: &str) -> Res
         .ok_or_else(|| format!("{name} must be {min}..={max}, got {value}"))
 }
 
+/// The validated options both modes accept.
+#[derive(Clone, Copy)]
+struct Options {
+    offset_percent: u8,
+    font_scale_percent: u8,
+    margin_mm: u8,
+    align: render::Align,
+}
+
 /// The options both modes accept, validated once. Returns the 400
 /// message when one is out of range.
 fn options_from(
     offset_percent: Option<i64>,
     font_scale_percent: Option<i64>,
+    margin_mm: Option<i64>,
     align: Option<&str>,
-) -> Result<(u8, u8, render::Align), String> {
-    let offset_percent = percent(
+) -> Result<Options, String> {
+    let offset_percent = bounded(
         offset_percent,
         DEFAULT_OFFSET_PERCENT,
         0,
         MAX_OFFSET_PERCENT,
         "offset_percent",
     )?;
-    let font_scale_percent = percent(
+    let font_scale_percent = bounded(
         font_scale_percent,
         DEFAULT_FONT_SCALE_PERCENT,
         MIN_FONT_SCALE_PERCENT,
         100,
         "font_scale_percent",
     )?;
+    let margin_mm = bounded(
+        margin_mm,
+        DEFAULT_MARGIN_MM,
+        ptouch::MIN_MARGIN_MM,
+        ptouch::MAX_MARGIN_MM,
+        "margin_mm",
+    )?;
     let align = match align {
         None => render::Align::default(),
         Some(value) => render::Align::parse(value)
             .ok_or_else(|| format!("align must be left, center or right, got {value}"))?,
     };
-    Ok((offset_percent, font_scale_percent, align))
+    Ok(Options {
+        offset_percent,
+        font_scale_percent,
+        margin_mm,
+        align,
+    })
 }
 
 /// Turns a request into a job, or the 400 message.
 fn job_from(request: &PrintRequest) -> Result<PrintJob, String> {
     let lines = label_lines(&request.text).ok_or_else(|| "text is empty".to_owned())?;
-    let (offset_percent, font_scale_percent, align) = options_from(
+    let options = options_from(
         request.offset_percent,
         request.font_scale_percent,
+        request.margin_mm,
         request.align.as_deref(),
     )?;
-    Ok(PrintJob {
-        labels: vec![lines],
-        offset_percent,
-        font: request.font.clone(),
-        font_scale_percent,
-        align,
-    })
+    Ok(job_with(vec![lines], request.font.clone(), options))
+}
+
+/// Assembles a job from its labels and the options both modes share.
+fn job_with(labels: Vec<Vec<String>>, font: Option<String>, options: Options) -> PrintJob {
+    PrintJob {
+        labels,
+        offset_percent: options.offset_percent,
+        margin_mm: options.margin_mm,
+        font,
+        font_scale_percent: options.font_scale_percent,
+        align: options.align,
+    }
 }
 
 /// Turns a continuous request into a job of several labels, or the 400
@@ -499,18 +537,13 @@ fn continuous_job_from(request: &ContinuousRequest) -> Result<PrintJob, String> 
     if labels.is_empty() {
         return Err("bodies are empty".to_owned());
     }
-    let (offset_percent, font_scale_percent, align) = options_from(
+    let options = options_from(
         request.offset_percent,
         request.font_scale_percent,
+        request.margin_mm,
         request.align.as_deref(),
     )?;
-    Ok(PrintJob {
-        labels,
-        offset_percent,
-        font: request.font.clone(),
-        font_scale_percent,
-        align,
-    })
+    Ok(job_with(labels, request.font.clone(), options))
 }
 
 async fn api_preview(State(state): State<AppState>, Json(request): Json<PrintRequest>) -> Response {
@@ -518,7 +551,7 @@ async fn api_preview(State(state): State<AppState>, Json(request): Json<PrintReq
         Ok(job) => job,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
-    let tape_mm = match percent(request.tape_mm, DEFAULT_TAPE_MM, 1, 99, "tape_mm") {
+    let tape_mm = match bounded(request.tape_mm, DEFAULT_TAPE_MM, 1, 99, "tape_mm") {
         Ok(mm) => mm,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
@@ -710,6 +743,7 @@ mod tests {
             [PrintJob {
                 labels: vec![vec!["abc".to_owned(), "def".to_owned()]],
                 offset_percent: 5,
+                margin_mm: 2,
                 font: None,
                 font_scale_percent: 100,
                 align: crate::render::Align::Left,
@@ -800,6 +834,15 @@ mod tests {
         assert_eq!(printer.jobs.lock().unwrap().len(), 1);
     }
 
+    fn preview_request(payload: &serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/preview")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_string(payload).unwrap()))
+            .unwrap()
+    }
+
     fn continuous_request(payload: &serde_json::Value) -> Request<Body> {
         Request::builder()
             .method("POST")
@@ -833,6 +876,7 @@ mod tests {
             [PrintJob {
                 labels: vec![vec!["M4 皿8".to_owned()], vec!["M4 皿10".to_owned()]],
                 offset_percent: 10,
+                margin_mm: 2,
                 font: None,
                 font_scale_percent: 100,
                 align: crate::render::Align::Center,
@@ -962,6 +1006,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_explicit_null_font_means_the_catalog_default() {
+        let printer = Arc::new(FakePrinter::default());
+
+        // The client sends the field even before /api/fonts answers, so
+        // null has to mean the same thing as leaving it out.
+        for request in [
+            json_request(&serde_json::json!({ "text": "abc", "font": null })),
+            continuous_request(&serde_json::json!({
+                "headers": ["M4"], "bodies": ["皿8"], "font": null
+            })),
+            preview_request(&serde_json::json!({ "text": "abc", "font": null })),
+        ] {
+            let response = app(printer.clone(), catalog())
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        assert!(
+            printer
+                .jobs
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|job| job.font.is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn the_margin_defaults_to_the_smallest_the_printer_accepts() {
+        let printer = Arc::new(FakePrinter::default());
+
+        for request in [
+            print_request("abc"),
+            continuous_request(&serde_json::json!({
+                "headers": ["M4"], "bodies": ["皿8"]
+            })),
+        ] {
+            let response = app(printer.clone(), catalog())
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let jobs = printer.jobs.lock().unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert!(jobs.iter().all(|job| job.margin_mm == 2));
+    }
+
+    #[tokio::test]
+    async fn an_explicit_margin_reaches_the_printer_and_out_of_range_is_rejected() {
+        let printer = Arc::new(FakePrinter::default());
+
+        for request in [
+            json_request(&serde_json::json!({ "text": "abc", "margin_mm": 127 })),
+            continuous_request(&serde_json::json!({
+                "headers": ["M4"], "bodies": ["皿8"], "margin_mm": 127
+            })),
+        ] {
+            let response = app(printer.clone(), catalog())
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        assert!(
+            printer
+                .jobs
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|j| j.margin_mm == 127)
+        );
+
+        // 1 and 0 are below Brother's minimum; 128 and 256 are above the
+        // maximum. All four are 400, not a JSON extraction failure.
+        for out_of_range in [0, 1, 128, 256, -1] {
+            for request in [
+                json_request(&serde_json::json!({ "text": "abc", "margin_mm": out_of_range })),
+                continuous_request(&serde_json::json!({
+                    "headers": ["M4"], "bodies": ["皿8"], "margin_mm": out_of_range
+                })),
+                preview_request(&serde_json::json!({ "text": "abc", "margin_mm": out_of_range })),
+            ] {
+                let response = app(printer.clone(), catalog())
+                    .oneshot(request)
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{out_of_range}");
+                assert!(
+                    body_string(response)
+                        .await
+                        .contains("margin_mm must be 2..=127"),
+                    "{out_of_range}"
+                );
+            }
+        }
+        assert_eq!(printer.jobs.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_margin_is_the_printer_feed_so_the_preview_ignores_it() {
+        let mut sizes = Vec::new();
+        for margin in [2, 127] {
+            let response = app(Arc::new(FakePrinter::default()), catalog())
+                .oneshot(preview_request(
+                    &serde_json::json!({ "text": "Gridfinity", "margin_mm": margin }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value =
+                serde_json::from_str(&body_string(response).await).unwrap();
+            sizes.push((
+                body["width_px"].clone(),
+                body["height_px"].clone(),
+                body["length_mm"].clone(),
+            ));
+        }
+        // The feed happens outside the bitmap, so neither the image nor
+        // the printed length it reports may move with it.
+        assert_eq!(sizes[0], sizes[1]);
+    }
+
+    #[tokio::test]
     async fn fonts_endpoint_lists_the_catalog_with_its_default() {
         let response = app(Arc::new(FakePrinter::default()), catalog())
             .oneshot(
@@ -1005,6 +1174,7 @@ mod tests {
             &PrintJob {
                 labels: vec![vec!["Gridfinity".to_owned()]],
                 offset_percent: 5,
+                margin_mm: 2,
                 font: None,
                 font_scale_percent: 100,
                 align: crate::render::Align::Left,

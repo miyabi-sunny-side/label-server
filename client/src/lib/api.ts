@@ -5,6 +5,7 @@ export interface PrintOptions {
   offset_percent: number;
   font: string | null;
   font_scale_percent: number;
+  margin_mm: number;
   align: Align;
 }
 
@@ -18,6 +19,7 @@ export interface ContinuousOptions {
   offset_percent: number;
   font: string | null;
   font_scale_percent: number;
+  margin_mm: number;
   align: Align;
 }
 
@@ -53,12 +55,18 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
   return payload;
 }
 
+/**
+ * `font: null` means "the server's catalog default", which is exactly
+ * what an absent field means to the server. Sending it explicitly keeps
+ * the body shape constant even before `/api/fonts` has answered.
+ */
 function body(options: PrintOptions) {
   return {
     text: options.text,
     offset_percent: options.offset_percent,
-    font: options.font ?? undefined,
+    font: options.font,
     font_scale_percent: options.font_scale_percent,
+    margin_mm: options.margin_mm,
     align: options.align,
   };
 }
@@ -75,8 +83,9 @@ export function postContinuousPrint(
     bodies: options.bodies,
     connector: options.connector,
     offset_percent: options.offset_percent,
-    font: options.font ?? undefined,
+    font: options.font,
     font_scale_percent: options.font_scale_percent,
+    margin_mm: options.margin_mm,
     align: options.align,
   });
 }

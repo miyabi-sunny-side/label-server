@@ -88,7 +88,8 @@ describe("Continuous page", () => {
       connector: "space",
       offset_percent: 5,
       font: "NotoSansCJK-Regular",
-      font_scale_percent: 100,
+      font_scale_percent: 40,
+      margin_mm: 2,
       align: "left",
     });
   });
@@ -124,6 +125,75 @@ describe("Continuous page", () => {
     await waitFor(() => expect(stateContainer().dataset.state).toBe("success"));
     const print = calls.find((c) => c.url === "/api/print/continuous");
     expect((print?.body as { connector: string }).connector).toBe("newline");
+  });
+
+  it("hides the same four settings behind 詳細 as the individual page", async () => {
+    const calls = stubFetch(() => json({ output: "printed 1 label" }));
+    render(Continuous);
+
+    const toggle = await screen.findByRole("button", { name: /詳細/ });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(
+      (
+        screen.getByRole("spinbutton", {
+          name: "文字サイズ (%)",
+        }) as HTMLInputElement
+      ).value,
+    ).toBe("40");
+    expect(screen.queryByRole("spinbutton", { name: "余白 (mm)" })).toBeNull();
+
+    await fireEvent.click(toggle);
+    await fireEvent.input(
+      screen.getByRole("spinbutton", { name: "余白 (mm)" }),
+      { target: { value: "20" } },
+    );
+    await fireEvent.click(toggle);
+
+    await fill("M4", "皿8");
+    await fireEvent.click(screen.getByRole("button", { name: "印刷" }));
+
+    await waitFor(() => expect(stateContainer().dataset.state).toBe("success"));
+    const body = calls.find((c) => c.url === "/api/print/continuous")?.body as {
+      margin_mm: number;
+      font_scale_percent: number;
+    };
+    expect(body.margin_mm).toBe(20);
+    expect(body.font_scale_percent).toBe(40);
+  });
+
+  it("still sends every option when the font catalog never answers", async () => {
+    const calls: { url: string; body: unknown }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockImplementation((input, init) => {
+        const url = String(input);
+        calls.push({
+          url,
+          body: init?.body ? JSON.parse(String(init.body)) : null,
+        });
+        if (url === "/api/fonts") return new Promise<Response>(() => {});
+        return Promise.resolve(json({ output: "printed 1 label" }));
+      }),
+    );
+    render(Continuous);
+
+    await fill("M4", "皿8");
+    await fireEvent.click(screen.getByRole("button", { name: "印刷" }));
+    await waitFor(() => expect(stateContainer().dataset.state).toBe("success"));
+
+    const body = calls.find((c) => c.url === "/api/print/continuous")
+      ?.body as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual([
+      "align",
+      "bodies",
+      "connector",
+      "font",
+      "font_scale_percent",
+      "headers",
+      "margin_mm",
+      "offset_percent",
+    ]);
+    expect(body.font).toBeNull();
   });
 
   it("shows the printer's own message when the job fails", async () => {

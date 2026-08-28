@@ -18,7 +18,10 @@
 
   let text = $state("");
   let offsetPercent = $state(5);
-  let fontScalePercent = $state(100);
+  // 40% and 60% turned out to be the useful sizes, so the form opens at
+  // 40. The API keeps defaulting to 100 when the field is omitted.
+  let fontScalePercent = $state(40);
+  let marginMm = $state(2);
   let font = $state<string | null>(null);
   let align = $state<Align>("left");
 
@@ -34,6 +37,7 @@
     offset_percent: offsetPercent,
     font,
     font_scale_percent: fontScalePercent,
+    margin_mm: marginMm,
     align,
   });
 
@@ -109,6 +113,7 @@
     bind:align
     bind:offsetPercent
     bind:fontScalePercent
+    bind:marginMm
     disabled={printState === "printing"}
   />
 

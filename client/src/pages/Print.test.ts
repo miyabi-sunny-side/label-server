@@ -61,6 +61,16 @@ function stubFetch(
   return { fetchMock, calls };
 }
 
+/**
+ * The fonts arrive behind the 詳細 accordion, so tests that touch a
+ * hidden control open it first. Tests that only need the catalog loaded
+ * wait on the toggle, which renders immediately.
+ */
+async function openDetails() {
+  await fireEvent.click(await screen.findByRole("button", { name: /詳細/ }));
+  return screen.findByRole("combobox", { name: "フォント" });
+}
+
 describe("Print", () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -72,13 +82,28 @@ describe("Print", () => {
     vi.useRealTimers();
   });
 
-  it("offers the catalog fonts with the default selected", async () => {
+  it("shows only 文字サイズ until 詳細 is opened", async () => {
     stubFetch();
     render(Print);
 
-    const select = (await screen.findByRole("combobox", {
-      name: "フォント",
-    })) as HTMLSelectElement;
+    const toggle = await screen.findByRole("button", { name: /詳細/ });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(
+      (
+        screen.getByRole("spinbutton", {
+          name: "文字サイズ (%)",
+        }) as HTMLInputElement
+      ).value,
+    ).toBe("40");
+    for (const name of ["フォント", "揃え"]) {
+      expect(screen.queryByRole("combobox", { name })).toBeNull();
+    }
+    for (const name of ["オフセット (%)", "余白 (mm)"]) {
+      expect(screen.queryByRole("spinbutton", { name })).toBeNull();
+    }
+
+    const select = (await openDetails()) as HTMLSelectElement;
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
     await waitFor(() => expect(select.options).toHaveLength(2));
     expect(select.value).toBe("NotoSansCJK-Regular");
     expect(
@@ -91,20 +116,126 @@ describe("Print", () => {
     expect(
       (
         screen.getByRole("spinbutton", {
-          name: "文字サイズ (%)",
+          name: "余白 (mm)",
         }) as HTMLInputElement
       ).value,
-    ).toBe("100");
+    ).toBe("2");
     expect(
       (screen.getByRole("combobox", { name: "揃え" }) as HTMLSelectElement)
         .value,
     ).toBe("left");
   });
 
+  it("sends the hidden defaults even when 詳細 is never opened", async () => {
+    const { calls } = stubFetch(() => json({ output: "printed" }));
+    render(Print);
+    await screen.findByRole("button", { name: /詳細/ });
+
+    await fireEvent.input(
+      screen.getByRole("textbox", { name: "ラベルの文字" }),
+      { target: { value: "abc" } },
+    );
+    await fireEvent.click(screen.getByRole("button", { name: "印刷" }));
+
+    await waitFor(() => expect(stateContainer().dataset.state).toBe("success"));
+    expect(calls.find((c) => c.url === "/api/print")?.body).toEqual({
+      text: "abc",
+      offset_percent: 5,
+      font: "NotoSansCJK-Regular",
+      font_scale_percent: 40,
+      margin_mm: 2,
+      align: "left",
+    });
+  });
+
+  it("still sends every option when the font catalog never answers", async () => {
+    const calls: { url: string; body: unknown }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockImplementation((input, init) => {
+        const url = String(input);
+        calls.push({
+          url,
+          body: init?.body ? JSON.parse(String(init.body)) : null,
+        });
+        // The catalog never resolves, so `font` is still null when the
+        // preview and the print go out. The bodies must not lose the key
+        // over that race.
+        if (url === "/api/fonts") return new Promise<Response>(() => {});
+        if (url === "/api/preview") return Promise.resolve(json(PREVIEW));
+        return Promise.resolve(json({ output: "printed" }));
+      }),
+    );
+    render(Print);
+    await screen.findByRole("button", { name: /詳細/ });
+
+    await fireEvent.input(
+      screen.getByRole("textbox", { name: "ラベルの文字" }),
+      { target: { value: "abc" } },
+    );
+    await vi.advanceTimersByTimeAsync(400);
+    await waitFor(() =>
+      expect(calls.filter((c) => c.url === "/api/preview")).toHaveLength(1),
+    );
+
+    await fireEvent.click(screen.getByRole("button", { name: "印刷" }));
+    await waitFor(() => expect(stateContainer().dataset.state).toBe("success"));
+
+    const shared = [
+      "align",
+      "font",
+      "font_scale_percent",
+      "margin_mm",
+      "offset_percent",
+      "text",
+    ];
+    for (const [url, keys] of [
+      ["/api/print", shared],
+      ["/api/preview", [...shared, "tape_mm"].sort()],
+    ] as const) {
+      const body = calls.find((c) => c.url === url)?.body as Record<
+        string,
+        unknown
+      >;
+      expect(body, url).toBeTruthy();
+      expect(Object.keys(body).sort(), url).toEqual(keys);
+      expect(body.font, url).toBeNull();
+    }
+  });
+
+  it("keeps a changed detail after 詳細 is closed again", async () => {
+    const { calls } = stubFetch(() => json({ output: "printed" }));
+    render(Print);
+    const toggle = await screen.findByRole("button", { name: /詳細/ });
+    await openDetails();
+
+    await fireEvent.input(
+      screen.getByRole("spinbutton", { name: "余白 (mm)" }),
+      {
+        target: { value: "20" },
+      },
+    );
+    await fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("spinbutton", { name: "余白 (mm)" })).toBeNull();
+
+    await fireEvent.input(
+      screen.getByRole("textbox", { name: "ラベルの文字" }),
+      { target: { value: "abc" } },
+    );
+    await fireEvent.click(screen.getByRole("button", { name: "印刷" }));
+
+    await waitFor(() => expect(stateContainer().dataset.state).toBe("success"));
+    expect(
+      (calls.find((c) => c.url === "/api/print")?.body as { margin_mm: number })
+        .margin_mm,
+    ).toBe(20);
+  });
+
   it("previews the label after typing and reports the tape length", async () => {
     const { calls } = stubFetch();
     render(Print);
-    await screen.findByRole("combobox", { name: "フォント" });
+    await openDetails();
 
     await fireEvent.input(
       screen.getByRole("textbox", { name: "ラベルの文字" }),
@@ -131,7 +262,8 @@ describe("Print", () => {
       text: "Gridfinity",
       offset_percent: 10,
       font: "NotoSansCJK-Regular",
-      font_scale_percent: 100,
+      font_scale_percent: 40,
+      margin_mm: 2,
       align: "left",
       tape_mm: 12,
     });
@@ -161,7 +293,7 @@ describe("Print", () => {
       }),
     );
     render(Print);
-    await screen.findByRole("combobox", { name: "フォント" });
+    await screen.findByRole("button", { name: /詳細/ });
 
     const textarea = screen.getByRole("textbox", { name: "ラベルの文字" });
     await fireEvent.input(textarea, { target: { value: "first" } });
@@ -187,7 +319,7 @@ describe("Print", () => {
       }),
     );
     render(Print);
-    await screen.findByRole("combobox", { name: "フォント" });
+    await screen.findByRole("button", { name: /詳細/ });
 
     const textarea = screen.getByRole("textbox", { name: "ラベルの文字" });
     await fireEvent.input(textarea, { target: { value: "abc" } });
@@ -211,7 +343,7 @@ describe("Print", () => {
     const pending = deferred<Response>();
     const { calls } = stubFetch(() => pending.promise);
     render(Print);
-    await screen.findByRole("combobox", { name: "フォント" });
+    await openDetails();
 
     await fireEvent.input(
       screen.getByRole("textbox", { name: "ラベルの文字" }),
@@ -244,6 +376,7 @@ describe("Print", () => {
       offset_percent: 5,
       font: "BIZUDPGothic-Regular",
       font_scale_percent: 70,
+      margin_mm: 2,
       align: "center",
     });
 
@@ -255,7 +388,7 @@ describe("Print", () => {
   it("shows the printer's error message when printing fails", async () => {
     stubFetch(() => json({ error: "no printer found" }, 502));
     render(Print);
-    await screen.findByRole("combobox", { name: "フォント" });
+    await screen.findByRole("button", { name: /詳細/ });
     await fireEvent.input(
       screen.getByRole("textbox", { name: "ラベルの文字" }),
       {
@@ -271,7 +404,7 @@ describe("Print", () => {
   it("does not submit or preview blank text", async () => {
     const { calls } = stubFetch();
     render(Print);
-    await screen.findByRole("combobox", { name: "フォント" });
+    await screen.findByRole("button", { name: /詳細/ });
     await fireEvent.click(screen.getByRole("button", { name: "印刷" }));
     await vi.advanceTimersByTimeAsync(400);
 
