@@ -2,8 +2,8 @@
 version: alpha
 name: Sumi / label-server
 description: >
-  Self-contained design contract for label-server — a one-screen tool
-  that prints a Brother PT-P700 label from a textarea. Dark theme is
+  Self-contained design contract for label-server — a two-mode tool
+  that prints Brother PT-P700 labels from a textarea. Dark theme is
   Sumi (the CSS default), light theme is Kinari; Washi is deliberately
   not adopted. Consulted: rust-svelte-template (Sumi + Kinari) @
   2026-08-27. This file is the sole ongoing styling authority for this
@@ -128,6 +128,17 @@ components:
   radio-selected:
     backgroundColor: "{colors.accent-subtle}"
     rounded: "{rounded.sm}"
+  mode-tab:
+    backgroundColor: "{colors.wash-base}"
+    textColor: "{colors.muted}"
+    typography: "{typography.label}"
+    rounded: "{rounded.sm}"
+    padding: 8px
+  # Like radio-selected, this is a translucent tint over the header band;
+  # the ink stays on-surface (see Components).
+  mode-tab-current:
+    backgroundColor: "{colors.accent-subtle}"
+    rounded: "{rounded.sm}"
   error-banner:
     backgroundColor: "{colors.danger-subtle}"
     textColor: "{colors.danger}"
@@ -143,11 +154,23 @@ components:
 
 ## Overview
 
-label-server is a **one-screen tool**: type text into a textarea, press
+label-server is a **two-mode tool**: type text into a textarea, press
 印刷, and a Brother PT-P700 prints the label. There is nothing to
 browse, configure, or lay out — the whole product is the shortest path
 from "I want this text on tape" to a printed label. Everything the UI
 adds beyond that path is friction.
+
+The two modes exist because the printer feeds a leader of roughly 24mm
+at the start of every job, and that leader is thrown away:
+
+- **個別 (`/`)** — one label per press, with a live preview.
+- **連続 (`/continuous`)** — several labels in one job. The leader is
+  fed once for the whole batch instead of once per label, so printing
+  ten labels wastes one leader rather than ten. Labels are cut apart
+  from each other as usual.
+
+The modes are peers, not a hierarchy: each is a single screen, and
+switching between them is the only navigation in the product.
 
 The personality is **calm, quiet, and tool-like**: content first, chrome
 recedes into neutral ink tones, color only where it means something. The
@@ -169,9 +192,17 @@ depends on nothing outside this repository.
 
 ### Domain model
 
-- **Label text** — the textarea contents. Each line becomes one printed
-  line; leading and trailing blank lines are dropped, inner blank lines
-  are kept. Blank text is not printable.
+- **Print mode** — 個別 or 連続, chosen by the header tabs and carried
+  in the URL. Each mode owns its own form; they share nothing but the
+  print options.
+- **Label text (個別)** — the textarea contents. Each line becomes one
+  printed line; leading and trailing blank lines are dropped, inner
+  blank lines are kept. Blank text is not printable.
+- **Label list (連続)** — the textarea contents, one label per line.
+  Blank lines make no label. A **header word** and a **connector**
+  (改行 / 半角スペース / 無し) prefix every label, so 「M4」+ 半角スペース
+  over 皿8 / 皿10 prints 「M4 皿8」 and 「M4 皿10」. The server owns the
+  joining rule; the UI only says how many labels the job will print.
 - **Print options** — font (one of the server's catalog, default
   preselected), 揃え (left / center / right placement of shorter lines,
   default 左寄せ), offset (% of the tape width kept blank on each edge,
@@ -181,8 +212,10 @@ depends on nothing outside this repository.
   an assumed 12mm tape, and the UI shows it 1:1 with the tape length it
   occupies (before the printer's leader and cut margins). It refreshes
   300ms after the last change; blank text shows no preview.
-- **Print request** — one `POST /api/print` per press. The cut mode and
-  the real tape width come from the printer.
+- **Print request** — one `POST /api/print` (個別) or one
+  `POST /api/print/continuous` (連続) per press; the continuous request
+  carries every label of the job. The cut mode and the real tape width
+  come from the printer.
 - **Print state** — `idle | printing | success | error`, exposed on the
   form as `data-state`. Exactly one request is in flight at a time.
 
@@ -271,10 +304,13 @@ The shell stacks two rows:
 
 1. **App header — invariant.** Sticky, 48px, full width,
    `--c-wash-base` background, 1px bottom hairline. Contents are exactly
-   two: the app title as a home link (`<a href="/">`, label type,
-   on-surface ink, no underline — left) and the hamburger icon-button
-   (right). **The title is the header's only navigation link.**
-2. **Main content — the print form**, the only scrolling region.
+   three: the app title as a home link (`<a href="/">`, label type,
+   on-surface ink, no underline — left), the mode tabs next to it, and
+   the hamburger icon-button (right). **Navigation between the two
+   modes lives inline in the header; the hamburger menu stays for
+   secondary actions only.**
+2. **Main content — the form of the current mode**, the only scrolling
+   region.
 
 One breakpoint: **768px**. Below it, a single column with `--sp-3` side
 gutters; at and above, the content column centers at max-width 720px with
@@ -341,6 +377,15 @@ entry.
 - **App header:** per Layout. The title link keeps on-surface ink with
   no underline (chrome, not content). The hamburger is a 36px quiet
   icon-button with `aria-label` and `aria-expanded`.
+- **Mode tabs:** a `<nav aria-label="印刷モード">` sitting immediately
+  right of the title and taking the remaining space before the
+  hamburger. Two `<a>` rows — 個別 (`/`) and 連続 (`/continuous`) —
+  label type, `--sp-2`/`--sp-3` padding, sm radius, `--sp-1` between
+  them, muted ink, hover `--c-hover-1`. The current one carries
+  `aria-current="page"` and takes the same `accent-subtle` tint as a
+  selected theme radio with on-surface ink. They stay plain links, so
+  middle-click and ⌘-click open a real tab; a plain click is
+  intercepted and becomes a `pushState`.
 - **Menu (from the hamburger):** a dropdown panel spatially anchored to
   the hamburger, not a modal — absolutely positioned at `top: 100%` /
   `right: 0` within the header's positioned right slot, `min-width`
@@ -359,7 +404,7 @@ entry.
   (`sun`), ダーク (`moon`). Selecting applies immediately (attribute +
   storage) and **does not close the modal**. Close via ×, Esc, or scrim;
   focus returns to the hamburger.
-- **Print form — the only page.** A `<form>` carrying
+- **Print form — the 個別 page (`/`).** A `<form>` carrying
   `data-state="idle|printing|success|error"`:
   - _field:_ a `<label>` wrapping the caption ラベルの文字 (caption,
     muted) and the textarea (input recipe: surface bg, 1px hairline,
@@ -395,6 +440,25 @@ entry.
     `white-space: pre-wrap`) shows the printer's own message verbatim.
   - Blank text (only whitespace) never submits and leaves the state at
     `idle`.
+- **Continuous form — the 連続 page (`/continuous`).** A `<form>`
+  carrying the same `data-state="idle|printing|success|error"`:
+  - _header row:_ two labelled inputs in the input recipe, a 2fr / 1fr
+    grid with `--sp-3` gap — ヘッダーワード (`type="text"`, placeholder
+    M4) and 接続ワード (`<select>` 改行 / 半角スペース / 無し, default
+    半角スペース). Below 768px they stack.
+  - _field:_ the caption ラベルの文字 and a 6-row textarea in the same
+    input recipe as 個別, placeholder 改行ごとに別のラベルになります.
+  - _settings row:_ the same four inputs as 個別, from one shared
+    component — the two modes never drift apart.
+  - _action row:_ the primary button 印刷 followed by a muted
+    「N 枚」 count that tracks the non-blank lines, then the status
+    slot. The button is disabled while the count is 0 — a job of no
+    labels is never sent.
+  - _states:_ identical to 個別 (printing disables every control and
+    shows the accent spinner + 印刷中…; success reads 印刷しました and
+    keeps the text; error shows the printer's message verbatim in the
+    banner). There is **no preview** — one strip cannot honestly stand
+    for a batch.
 - **Buttons:** default = surface-raised bg, 1px hairline, label type,
   sm radius, 8×14px padding, hover fills `--c-hover-1`. Primary =
   accent bg, `surface-raised`-token text — 印刷 is the only one.
@@ -413,8 +477,11 @@ entry.
 - No calibration of the preview against the physical label (leader,
   cut margin, thermal spread) — deliberately deferred.
 - No history of printed labels, no templates, no accounts.
-- No routing: `/` is the whole app; every other path serves the same
-  page.
+- No routing beyond the two modes: `/` and `/continuous` are the whole
+  app. Any other path serves the same page and falls back to 個別.
+- No preview in 連続 — the preview belongs to the single-label mode.
+- No per-label options in a continuous job: every label of one job
+  shares one font, alignment, offset and size.
 
 ## Implementation Mapping
 
@@ -431,9 +498,16 @@ entry.
   `"dark"` set `data-theme` on `<html>` before first paint; absent key
   (auto) leaves the attribute off. `Icon.svelte` is the sole icon
   source.
-- The print form is `client/src/pages/Print.svelte`; requests go
-  through `client/src/lib/api.ts` (`/api/fonts`, `/api/preview`,
-  `/api/print`).
+- The 個別 form is `client/src/pages/Print.svelte` and the 連続 form is
+  `client/src/pages/Continuous.svelte`; the settings row both use is
+  `client/src/lib/Settings.svelte`. Requests go through
+  `client/src/lib/api.ts` (`/api/fonts`, `/api/preview`, `/api/print`,
+  `/api/print/continuous`).
+- Routing is `client/src/lib/routes.ts` (the pattern table) and
+  `client/src/lib/router.svelte.ts` (a runes store plus the delegated
+  click handler that turns same-origin links into `pushState`).
+  `App.svelte` picks the page from `router.index`. The server serves
+  `index.html` for unknown paths, so a deep link survives a reload.
 
 ## Verification
 
@@ -446,14 +520,22 @@ entry.
   2. Choosing ライト in the theme modal sets `data-theme="light"`,
      turns the body `rgb(250, 246, 239)`, writes the storage key, and
      leaves the modal open.
-  3. At 375px the header contains exactly two interactive elements —
-     the title `<a href="/">` and the hamburger `<button>` — and
-     `document.documentElement.scrollWidth` never exceeds the
-     viewport, with the menu closed or open.
+  3. At 375px the header contains exactly four interactive elements —
+     the title `<a href="/">`, the two mode tabs and the hamburger
+     `<button>` — and `document.documentElement.scrollWidth` never
+     exceeds the viewport, with the menu closed or open.
+  3b. Loading `/continuous` directly renders the 連続 form with its tab
+     marked `aria-current="page"`; clicking 個別 swaps the form without
+     a document load and the browser's back button swaps it back.
   4. The form's `data-state` walks idle → printing → success (or error)
      on one press; during printing the 印刷 button and every input are
      disabled and exactly one `POST /api/print` is sent, carrying the
      same font / offset / size as the last preview.
+  4a. On the 連続 page, three non-blank lines show 「3 枚」 and one
+     press sends exactly one `POST /api/print/continuous` whose
+     `bodies` are those three lines, whose `headers` repeat the header
+     word, and whose settings match the four inputs. With no non-blank
+     line the 印刷 button is disabled.
   4b. Typing text then pausing 300ms sends one `POST /api/preview`; the
      strip's `data-preview` reaches `ready`, the `<img>` height equals
      the returned `height_px`, and the caption states the mm length.
@@ -478,6 +560,11 @@ entry.
 - Do keep exactly one accent-filled primary action per screen — 印刷.
 - Do present the menu as a hamburger-anchored dropdown; centered
   modals are for dialogs (theme settings), never for navigation.
+- Do keep mode switching inline in the header as plain `<a>` links;
+  don't move it into the hamburger menu and don't reimplement it as
+  buttons that only work with JavaScript.
+- Do give both modes the same settings component; don't let the two
+  forms grow separate copies of the same four inputs.
 - Don't use emoji or text glyphs as icons; every icon is an
   `Icon.svelte` dictionary entry.
 - Don't introduce font sizes, radii, spacing values, or shadows outside

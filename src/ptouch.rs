@@ -40,7 +40,11 @@ pub const PRECUT: [u8; 4] = [0x1b, 0x69, 0x4d, 0x40];
 /// dot to the 5mm that leaves enough tape to cut comfortably. This is on
 /// top of the ~24.3mm leader the cutter position forces.
 pub const MARGIN: [u8; 5] = [0x1b, 0x69, 0x64, 0x23, 0x00];
-/// Print with feeding (eject / cut).
+/// `FF` — ends a page that is not the last one of the job. The printer
+/// cuts it and keeps the job open, so the next label follows without a
+/// fresh leader.
+pub const PAGE_END: [u8; 1] = [0x0c];
+/// Print with feeding (eject / cut). Ends the last page of a job.
 pub const EJECT: [u8; 1] = [0x1a];
 
 /// 100 invalidation bytes followed by `ESC @` (initialise).
@@ -189,41 +193,52 @@ fn raster_packet(bitmap: &Bitmap, column: usize, offset: usize) -> Vec<u8> {
     packet
 }
 
-/// Initialises the printer, reads the tape, asks `make_bitmap` for the
-/// label (rows = tape width, columns = tape length), prints it and ejects.
-/// This is the whole production send sequence; [`UsbPrinter`] adds nothing.
+/// Initialises the printer, reads the tape, asks `make_bitmaps` for the
+/// labels (rows = tape width, columns = tape length) and prints them as
+/// one job: the printer feeds its leader once, cuts between labels and
+/// ejects after the last one. This is the whole production send
+/// sequence; [`UsbPrinter`] adds nothing.
 ///
 /// [`UsbPrinter`]: crate::UsbPrinter
 ///
 /// # Errors
-/// Returns the transport or status error, whatever `make_bitmap` returned
-/// (as [`Error::Render`]), or [`Error::TooTall`] when the bitmap does not
-/// fit the loaded tape.
-pub fn print<T, F>(transport: &mut T, precut: bool, make_bitmap: F) -> Result<Status, Error>
+/// Returns the transport or status error, whatever `make_bitmaps`
+/// returned (as [`Error::Render`]), or [`Error::TooTall`] when a bitmap
+/// does not fit the loaded tape.
+pub fn print<T, F>(transport: &mut T, precut: bool, make_bitmaps: F) -> Result<Status, Error>
 where
     T: Transport,
-    F: FnOnce(&Status) -> Result<Bitmap, String>,
+    F: FnOnce(&Status) -> Result<Vec<Bitmap>, String>,
 {
     transport.write(&init_command())?;
     let status = query_status(transport)?;
-    let bitmap = make_bitmap(&status).map_err(Error::Render)?;
-    if bitmap.height > status.tape_px {
+    let bitmaps = make_bitmaps(&status).map_err(Error::Render)?;
+    if bitmaps.is_empty() {
+        return Err(Error::Render("no labels to print".to_owned()));
+    }
+    if let Some(tall) = bitmaps.iter().find(|b| b.height > status.tape_px) {
         return Err(Error::TooTall {
-            height: bitmap.height,
+            height: tall.height,
             tape_px: status.tape_px,
         });
     }
     transport.write(&PACKBITS_ENABLE)?;
-    transport.write(&RASTER_MODE)?;
-    if precut {
-        transport.write(&PRECUT)?;
+    // Every page repeats its own mode, cut and margin settings, the way
+    // Brother's multi-page example does; only the compression mode is
+    // set once for the whole job.
+    for (index, bitmap) in bitmaps.iter().enumerate() {
+        transport.write(&RASTER_MODE)?;
+        if precut {
+            transport.write(&PRECUT)?;
+        }
+        transport.write(&MARGIN)?;
+        let offset = (MAX_PX - bitmap.height) / 2;
+        for column in 0..bitmap.width {
+            transport.write(&raster_packet(bitmap, column, offset))?;
+        }
+        let last = index + 1 == bitmaps.len();
+        transport.write(if last { &EJECT } else { &PAGE_END })?;
     }
-    transport.write(&MARGIN)?;
-    let offset = (MAX_PX - bitmap.height) / 2;
-    for column in 0..bitmap.width {
-        transport.write(&raster_packet(&bitmap, column, offset))?;
-    }
-    transport.write(&EJECT)?;
     Ok(status)
 }
 
@@ -379,7 +394,7 @@ mod tests {
         let mut seen_status = None;
         let status = print(&mut &transport, true, |status| {
             seen_status = Some(*status);
-            Ok(bitmap.clone())
+            Ok(vec![bitmap.clone()])
         })
         .unwrap();
         assert_eq!(status.media_width_mm, 12);
@@ -426,7 +441,7 @@ mod tests {
     fn printing_refuses_a_bitmap_taller_than_the_tape() {
         let transport = FakeTransport::with_media(12);
 
-        let err = print(&mut &transport, true, |_| Ok(Bitmap::new(1, 77))).unwrap_err();
+        let err = print(&mut &transport, true, |_| Ok(vec![Bitmap::new(1, 77)])).unwrap_err();
         assert!(matches!(
             err,
             Error::TooTall {
@@ -448,9 +463,80 @@ mod tests {
     }
 
     #[test]
+    fn a_job_with_several_labels_cuts_between_them_and_ejects_once() {
+        let transport = FakeTransport::with_media(12);
+        // Page 1 is the 2x4 bitmap above; page 2 is 1 column with its
+        // second row from the top inked, so the two pages differ.
+        let mut first = Bitmap::new(2, 4);
+        first.set(0, 3);
+        first.set(1, 0);
+        let mut second = Bitmap::new(1, 4);
+        second.set(0, 1);
+
+        print(&mut &transport, true, |_| {
+            Ok(vec![first.clone(), second.clone()])
+        })
+        .unwrap();
+
+        let writes = transport.writes.borrow();
+        let mut init = vec![0u8; 100];
+        init.extend_from_slice(&[0x1b, 0x40]);
+        assert_eq!(writes[0], init);
+        assert_eq!(writes[1], [0x1b, 0x69, 0x53]);
+        // The compression mode is set once for the whole job.
+        assert_eq!(writes[2], [0x4d, 0x02]);
+        // Page 1: mode, cut and margin, two raster columns, then FF —
+        // the page ends and is cut, but the job stays open.
+        assert_eq!(writes[3], [0x1b, 0x69, 0x61, 0x01]);
+        assert_eq!(writes[4], [0x1b, 0x69, 0x4d, 0x40]);
+        assert_eq!(writes[5], [0x1b, 0x69, 0x64, 0x23, 0x00]);
+        assert_eq!(
+            writes[6],
+            [
+                0x47, 0x11, 0x00, 0x0f, //
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+                0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ]
+        );
+        assert_eq!(
+            writes[7],
+            [
+                0x47, 0x11, 0x00, 0x0f, //
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, //
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ]
+        );
+        assert_eq!(writes[8], [0x0c]);
+        // Page 2 repeats the per-page settings. Its single column inks the
+        // row one below the top: bit 64 of the head, so byte 7 bit 0.
+        assert_eq!(writes[9], [0x1b, 0x69, 0x61, 0x01]);
+        assert_eq!(writes[10], [0x1b, 0x69, 0x4d, 0x40]);
+        assert_eq!(writes[11], [0x1b, 0x69, 0x64, 0x23, 0x00]);
+        assert_eq!(
+            writes[12],
+            [
+                0x47, 0x11, 0x00, 0x0f, //
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, //
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ]
+        );
+        // Only the last page ejects.
+        assert_eq!(writes[13], [0x1a]);
+        assert_eq!(writes.len(), 14);
+    }
+
+    #[test]
+    fn printing_nothing_at_all_is_rejected_before_any_raster_data() {
+        let transport = FakeTransport::with_media(12);
+        let err = print(&mut &transport, true, |_| Ok(Vec::new())).unwrap_err();
+        assert!(matches!(err, Error::Render(ref m) if m == "no labels to print"));
+        assert_eq!(transport.writes.borrow().len(), 2);
+    }
+
+    #[test]
     fn printing_without_precut_skips_the_precut_command() {
         let transport = FakeTransport::with_media(24);
-        print(&mut &transport, false, |_| Ok(Bitmap::new(1, 1))).unwrap();
+        print(&mut &transport, false, |_| Ok(vec![Bitmap::new(1, 1)])).unwrap();
         assert!(!transport.writes.borrow().contains(&PRECUT.to_vec()));
     }
 }

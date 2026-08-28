@@ -1,6 +1,13 @@
 <script lang="ts">
   import Icon from "./Icon.svelte";
   import ThemeModal from "./ThemeModal.svelte";
+  import { router } from "./router.svelte";
+
+  /// The two print modes, in route order.
+  const MODES = [
+    { href: "/", label: "個別" },
+    { href: "/continuous", label: "連続" },
+  ];
 
   let menuOpen = $state(false);
   let themeOpen = $state(false);
@@ -33,6 +40,17 @@
 
 <header>
   <a class="title" href="/">label-server</a>
+  <nav class="modes" aria-label="印刷モード">
+    {#each MODES as mode, index (mode.href)}
+      <a
+        class="mode"
+        href={mode.href}
+        aria-current={router.index === index ? "page" : undefined}
+      >
+        {mode.label}
+      </a>
+    {/each}
+  </nav>
   <div class="menu-wrapper">
     <button
       class="icon-btn"
@@ -52,7 +70,7 @@
         aria-label="メニューを閉じる"
         onclick={closeMenu}
       ></button>
-      <nav class="menu">
+      <nav class="menu" aria-label="メニュー">
         <button class="menu-item" type="button" onclick={openTheme}>
           テーマ設定
         </button>
@@ -83,6 +101,31 @@
     font-weight: 500
     color: var(--c-on-surface)
     text-decoration: none
+
+  .modes
+    display: flex
+    gap: var(--sp-1)
+    align-items: center
+    margin-right: auto
+    margin-left: var(--sp-4)
+
+  .mode
+    display: flex
+    align-items: center
+    padding: var(--sp-2) var(--sp-3)
+    border-radius: var(--radius-sm)
+    color: var(--c-muted)
+    font-size: var(--fs-md)
+    font-weight: 500
+    text-decoration: none
+
+    &:hover
+      background: var(--c-hover-1)
+
+    // Same selected tint as the theme radios.
+    &[aria-current="page"]
+      background: var(--c-accent-subtle)
+      color: var(--c-on-surface)
 
   .menu-wrapper
     position: relative

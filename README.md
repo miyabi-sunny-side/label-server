@@ -5,6 +5,12 @@ serves the JSON API and the Svelte page (compiled into it), renders the text wit
 font, and talks to the printer over USB itself (libusb is linked statically) — no CUPS, no driver,
 no external tool, nothing to place next to the binary.
 
+There are two modes. **個別** (`/`) prints one label per press and shows a live preview. **連続**
+(`/continuous`) prints a whole list in a single job: the printer feeds its ~24mm leader once for
+the batch instead of once per label, so a run of ten labels wastes one leader instead of ten. A
+header word can be prefixed to every line — 「M4」 over 皿8 / 皿10 prints 「M4 皿8」 and
+「M4 皿10」.
+
 The USB protocol and the text layout rules are a Rust port of
 [ptouch-print](https://codeberg.org/askaaron/ptouch-print) by Dominic Radermacher, which is why
 this project is licensed under the GPLv3 (see [License](#license)).
@@ -81,6 +87,13 @@ All label options are shared by printing and previewing:
   success, `400 {"error": "..."}` for blank text, an unknown font, or an option out of range, and
   `502 {"error": "<reason>"}` when the
   printer is missing, in Editor Lite mode, or the USB transfer fails.
+- `POST /api/print/continuous` with `{"headers": [...], "bodies": [...], "connector": "space"}`
+  plus the same options — prints every label as one job, cutting between them and ejecting after
+  the last. `headers` and `bodies` pair up by index and must be the same length; `connector` is
+  `newline`, `space` (default) or `none` and says how each header joins its body; an empty header
+  leaves the body alone, and blank bodies print nothing. Same status codes as `/api/print`, plus
+  `400` for mismatched lengths or an unknown connector. A batch reports
+  `{"output": "printed <n> labels on <n>mm tape"}`, since the labels differ in size.
 - `POST /api/preview` with the same fields plus `tape_mm` (default 12) — renders exactly what
   `/api/print` would send, without a printer. Returns `{"png_base64", "width_px", "height_px",
   "tape_px", "length_mm"}`; `length_mm` is the tape the label occupies at 180 dpi, before the

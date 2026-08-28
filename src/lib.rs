@@ -38,10 +38,14 @@ pub const DEFAULT_TAPE_MM: u8 = 12;
 /// PT-P700 print resolution.
 pub const DPI: f64 = 180.0;
 
-/// One label to print or preview.
+/// One print job: the labels it prints, in order, and the settings they
+/// all share. The individual mode sends a job of one label; the
+/// continuous mode sends a job of several, so the printer feeds its
+/// leader once instead of once per label.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrintJob {
-    pub lines: Vec<String>,
+    /// One entry per label, each holding that label's lines.
+    pub labels: Vec<Vec<String>>,
     pub offset_percent: u8,
     /// Font id from [`FontCatalog`]; `None` selects the catalog default.
     pub font: Option<String>,
@@ -165,14 +169,19 @@ pub fn render_job(
     catalog: &FontCatalog,
     job: &PrintJob,
     tape_px: usize,
-) -> Result<render::Bitmap, String> {
+) -> Result<Vec<render::Bitmap>, String> {
     let font = catalog
         .resolve(job.font.as_deref())
         .map_err(|id| format!("unknown font: {id}"))?;
-    let lines: Vec<&str> = job.lines.iter().map(String::as_str).collect();
     let height = print_height(tape_px, job.offset_percent);
-    render::render_lines(font, &lines, height, job.font_scale_percent, job.align)
-        .map_err(|e| e.to_string())
+    job.labels
+        .iter()
+        .map(|label| {
+            let lines: Vec<&str> = label.iter().map(String::as_str).collect();
+            render::render_lines(font, &lines, height, job.font_scale_percent, job.align)
+                .map_err(|e| e.to_string())
+        })
+        .collect()
 }
 
 /// Tape length a bitmap occupies, before the printer's own leader and
@@ -191,14 +200,26 @@ pub fn print_height(tape_px: usize, offset_percent: u8) -> usize {
     tape_px.saturating_sub(2 * edge)
 }
 
-/// Prints one label. The USB implementation is [`UsbPrinter`]; tests
+/// Prints one job. The USB implementation is [`UsbPrinter`]; tests
 /// substitute a recorder.
 pub trait Printer: Send + Sync {
-    /// Prints the job's lines top to bottom and returns a one-line summary.
+    /// Prints every label of the job in order and returns a one-line
+    /// summary.
     ///
     /// # Errors
     /// Returns a human-readable reason when the label could not be printed.
     fn print(&self, job: &PrintJob) -> Result<String, String>;
+}
+
+/// The one-line summary a finished job reports. A single label keeps
+/// reporting its own size; a batch reports how many labels it printed,
+/// since their sizes differ.
+#[must_use]
+pub fn print_summary(sizes: &[(usize, usize)], media_width_mm: u8) -> String {
+    match sizes {
+        [(width, height)] => format!("printed {width}x{height}px on {media_width_mm}mm tape"),
+        many => format!("printed {} labels on {media_width_mm}mm tape", many.len()),
+    }
 }
 
 /// Renders with the catalog and prints over USB.
@@ -216,17 +237,14 @@ impl UsbPrinter {
 impl Printer for UsbPrinter {
     fn print(&self, job: &PrintJob) -> Result<String, String> {
         let mut transport = ptouch::UsbTransport::open().map_err(|e| e.to_string())?;
-        let mut size = (0, 0);
+        let mut sizes = Vec::new();
         let status = ptouch::print(&mut transport, true, |status| {
-            let bitmap = render_job(&self.catalog, job, status.tape_px)?;
-            size = (bitmap.width, bitmap.height);
-            Ok(bitmap)
+            let bitmaps = render_job(&self.catalog, job, status.tape_px)?;
+            sizes = bitmaps.iter().map(|b| (b.width, b.height)).collect();
+            Ok(bitmaps)
         })
         .map_err(|e| e.to_string())?;
-        Ok(format!(
-            "printed {}x{}px on {}mm tape",
-            size.0, size.1, status.media_width_mm
-        ))
+        Ok(print_summary(&sizes, status.media_width_mm))
     }
 }
 
@@ -253,6 +271,56 @@ struct PrintRequest {
     align: Option<String>,
     /// Preview only: the tape to assume.
     tape_mm: Option<i64>,
+}
+
+/// One job of several labels. `headers` and `bodies` pair up by index —
+/// the client sends its single header word repeated, so a future label
+/// list with per-label prefixes needs no new shape. `connector` says how
+/// the two halves join.
+#[derive(Deserialize)]
+struct ContinuousRequest {
+    headers: Vec<String>,
+    bodies: Vec<String>,
+    /// `newline`, `space` (default) or `none`.
+    connector: Option<String>,
+    offset_percent: Option<i64>,
+    font: Option<String>,
+    font_scale_percent: Option<i64>,
+    align: Option<String>,
+}
+
+/// How a header word joins the body of its label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Connector {
+    /// A second line, so the label prints the header above the body.
+    Newline,
+    /// A single half-width space on one line.
+    Space,
+    /// Straight concatenation.
+    None,
+}
+
+impl Connector {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "newline" => Some(Self::Newline),
+            "space" => Some(Self::Space),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+
+    /// The lines of one label. An empty header leaves the body alone.
+    fn join(self, header: &str, body: &str) -> Vec<String> {
+        if header.is_empty() {
+            return vec![body.to_owned()];
+        }
+        match self {
+            Self::Newline => vec![header.to_owned(), body.to_owned()],
+            Self::Space => vec![format!("{header} {body}")],
+            Self::None => vec![format!("{header}{body}")],
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -301,6 +369,7 @@ pub fn app(printer: Arc<dyn Printer>, catalog: Arc<FontCatalog>) -> Router {
         .route("/fonts", get(api_fonts))
         .route("/preview", post(api_preview))
         .route("/print", post(api_print))
+        .route("/print/continuous", post(api_print_continuous))
         .fallback(api_not_found)
         .with_state(AppState { printer, catalog });
 
@@ -358,30 +427,85 @@ fn percent(value: Option<i64>, default: u8, min: u8, max: u8, name: &str) -> Res
         .ok_or_else(|| format!("{name} must be {min}..={max}, got {value}"))
 }
 
-/// Turns a request into a job, or the 400 message.
-fn job_from(request: &PrintRequest) -> Result<PrintJob, String> {
-    let lines = label_lines(&request.text).ok_or_else(|| "text is empty".to_owned())?;
+/// The options both modes accept, validated once. Returns the 400
+/// message when one is out of range.
+fn options_from(
+    offset_percent: Option<i64>,
+    font_scale_percent: Option<i64>,
+    align: Option<&str>,
+) -> Result<(u8, u8, render::Align), String> {
     let offset_percent = percent(
-        request.offset_percent,
+        offset_percent,
         DEFAULT_OFFSET_PERCENT,
         0,
         MAX_OFFSET_PERCENT,
         "offset_percent",
     )?;
     let font_scale_percent = percent(
-        request.font_scale_percent,
+        font_scale_percent,
         DEFAULT_FONT_SCALE_PERCENT,
         MIN_FONT_SCALE_PERCENT,
         100,
         "font_scale_percent",
     )?;
-    let align = match request.align.as_deref() {
+    let align = match align {
         None => render::Align::default(),
         Some(value) => render::Align::parse(value)
             .ok_or_else(|| format!("align must be left, center or right, got {value}"))?,
     };
+    Ok((offset_percent, font_scale_percent, align))
+}
+
+/// Turns a request into a job, or the 400 message.
+fn job_from(request: &PrintRequest) -> Result<PrintJob, String> {
+    let lines = label_lines(&request.text).ok_or_else(|| "text is empty".to_owned())?;
+    let (offset_percent, font_scale_percent, align) = options_from(
+        request.offset_percent,
+        request.font_scale_percent,
+        request.align.as_deref(),
+    )?;
     Ok(PrintJob {
-        lines,
+        labels: vec![lines],
+        offset_percent,
+        font: request.font.clone(),
+        font_scale_percent,
+        align,
+    })
+}
+
+/// Turns a continuous request into a job of several labels, or the 400
+/// message. Blank body lines print nothing, so they are dropped along
+/// with their header.
+fn continuous_job_from(request: &ContinuousRequest) -> Result<PrintJob, String> {
+    if request.headers.len() != request.bodies.len() {
+        return Err(format!(
+            "headers and bodies must have the same length, got {} and {}",
+            request.headers.len(),
+            request.bodies.len()
+        ));
+    }
+    let connector = match request.connector.as_deref() {
+        None => Connector::Space,
+        Some(value) => Connector::parse(value)
+            .ok_or_else(|| format!("connector must be newline, space or none, got {value}"))?,
+    };
+    let labels: Vec<Vec<String>> = request
+        .headers
+        .iter()
+        .zip(&request.bodies)
+        .filter(|(_, body)| !body.trim().is_empty())
+        .map(|(header, body)| connector.join(header.trim(), body.trim()))
+        .collect();
+    if labels.is_empty() {
+        return Err("bodies are empty".to_owned());
+    }
+    let (offset_percent, font_scale_percent, align) = options_from(
+        request.offset_percent,
+        request.font_scale_percent,
+        request.align.as_deref(),
+    )?;
+    Ok(PrintJob {
+        labels,
         offset_percent,
         font: request.font.clone(),
         font_scale_percent,
@@ -404,11 +528,15 @@ async fn api_preview(State(state): State<AppState>, Json(request): Json<PrintReq
             format!("tape_mm {tape_mm} is not a PT-P700 tape"),
         );
     };
-    let bitmap = match render_job(&state.catalog, &job, tape_px) {
-        Ok(bitmap) => bitmap,
+    let bitmaps = match render_job(&state.catalog, &job, tape_px) {
+        Ok(bitmaps) => bitmaps,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
-    let png = match render::encode_png(&bitmap) {
+    // A preview request always carries exactly one label.
+    let Some(bitmap) = bitmaps.first() else {
+        return error(StatusCode::BAD_REQUEST, "text is empty".to_owned());
+    };
+    let png = match render::encode_png(bitmap) {
         Ok(png) => png,
         Err(message) => return error(StatusCode::INTERNAL_SERVER_ERROR, message),
     };
@@ -423,10 +551,24 @@ async fn api_preview(State(state): State<AppState>, Json(request): Json<PrintReq
 }
 
 async fn api_print(State(state): State<AppState>, Json(request): Json<PrintRequest>) -> Response {
-    let job = match job_from(&request) {
-        Ok(job) => job,
-        Err(message) => return error(StatusCode::BAD_REQUEST, message),
-    };
+    match job_from(&request) {
+        Ok(job) => send(state, job).await,
+        Err(message) => error(StatusCode::BAD_REQUEST, message),
+    }
+}
+
+async fn api_print_continuous(
+    State(state): State<AppState>,
+    Json(request): Json<ContinuousRequest>,
+) -> Response {
+    match continuous_job_from(&request) {
+        Ok(job) => send(state, job).await,
+        Err(message) => error(StatusCode::BAD_REQUEST, message),
+    }
+}
+
+/// Hands a validated job to the printer off the async runtime.
+async fn send(state: AppState, job: PrintJob) -> Response {
     if let Err(id) = state.catalog.resolve(job.font.as_deref()) {
         return error(StatusCode::BAD_REQUEST, format!("unknown font: {id}"));
     }
@@ -459,7 +601,7 @@ mod tests {
 
     use super::{
         EMBEDDED_FONT, EMBEDDED_FONT_ID, FontCatalog, FontSource, PrintJob, Printer, app,
-        label_lines, length_mm, print_height,
+        label_lines, length_mm, print_height, print_summary,
     };
 
     fn catalog() -> Arc<FontCatalog> {
@@ -527,6 +669,18 @@ mod tests {
     }
 
     #[test]
+    fn one_label_reports_its_size_and_a_batch_reports_its_count() {
+        assert_eq!(
+            print_summary(&[(348, 68)], 12),
+            "printed 348x68px on 12mm tape"
+        );
+        assert_eq!(
+            print_summary(&[(348, 68), (120, 68), (96, 68)], 12),
+            "printed 3 labels on 12mm tape"
+        );
+    }
+
+    #[test]
     fn label_lines_keeps_inner_blank_lines_and_trims_the_edges() {
         assert_eq!(
             label_lines("abc\n\n12mm テスト  \n").unwrap(),
@@ -554,7 +708,7 @@ mod tests {
         assert_eq!(
             *printer.jobs.lock().unwrap(),
             [PrintJob {
-                lines: vec!["abc".to_owned(), "def".to_owned()],
+                labels: vec![vec!["abc".to_owned(), "def".to_owned()]],
                 offset_percent: 5,
                 font: None,
                 font_scale_percent: 100,
@@ -646,6 +800,167 @@ mod tests {
         assert_eq!(printer.jobs.lock().unwrap().len(), 1);
     }
 
+    fn continuous_request(payload: &serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/print/continuous")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_string(payload).unwrap()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_continuous_request_becomes_one_job_of_several_labels() {
+        let printer = Arc::new(FakePrinter::default());
+
+        let response = app(printer.clone(), catalog())
+            .oneshot(continuous_request(&serde_json::json!({
+                "headers": ["M4", "M4"],
+                "bodies": ["皿8", "皿10"],
+                "connector": "space",
+                "align": "center",
+                "offset_percent": 10
+            })))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_string(response).await, r#"{"output":"printed"}"#);
+        // One job, not one per label: that is what keeps the printer from
+        // feeding a fresh leader between labels.
+        assert_eq!(
+            *printer.jobs.lock().unwrap(),
+            [PrintJob {
+                labels: vec![vec!["M4 皿8".to_owned()], vec!["M4 皿10".to_owned()]],
+                offset_percent: 10,
+                font: None,
+                font_scale_percent: 100,
+                align: crate::render::Align::Center,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_connector_decides_how_a_header_joins_its_body() {
+        for (connector, expected) in [
+            ("newline", vec!["M4".to_owned(), "皿8".to_owned()]),
+            ("space", vec!["M4 皿8".to_owned()]),
+            ("none", vec!["M4皿8".to_owned()]),
+        ] {
+            let printer = Arc::new(FakePrinter::default());
+            let response = app(printer.clone(), catalog())
+                .oneshot(continuous_request(&serde_json::json!({
+                    "headers": ["M4"], "bodies": ["皿8"], "connector": connector
+                })))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{connector}");
+            assert_eq!(
+                printer.jobs.lock().unwrap()[0].labels,
+                [expected],
+                "{connector}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_header_leaves_the_body_alone() {
+        let printer = Arc::new(FakePrinter::default());
+
+        let response = app(printer.clone(), catalog())
+            .oneshot(continuous_request(&serde_json::json!({
+                "headers": ["", ""], "bodies": ["皿8", "皿10"], "connector": "newline"
+            })))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            printer.jobs.lock().unwrap()[0].labels,
+            [vec!["皿8".to_owned()], vec!["皿10".to_owned()]]
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_body_lines_print_nothing_and_all_blank_is_rejected() {
+        let printer = Arc::new(FakePrinter::default());
+
+        let response = app(printer.clone(), catalog())
+            .oneshot(continuous_request(&serde_json::json!({
+                "headers": ["M4", "M4", "M4"], "bodies": ["皿8", "   ", "皿10"]
+            })))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            printer.jobs.lock().unwrap()[0].labels,
+            [vec!["M4 皿8".to_owned()], vec!["M4 皿10".to_owned()]]
+        );
+
+        let response = app(printer.clone(), catalog())
+            .oneshot(continuous_request(&serde_json::json!({
+                "headers": ["M4"], "bodies": ["  "]
+            })))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(body_string(response).await.contains("bodies are empty"));
+        assert_eq!(printer.jobs.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_continuous_request_is_rejected_when_it_cannot_make_labels() {
+        let printer = Arc::new(FakePrinter::default());
+        for (payload, expected) in [
+            (
+                serde_json::json!({ "headers": ["M4"], "bodies": ["皿8", "皿10"] }),
+                "headers and bodies must have the same length, got 1 and 2",
+            ),
+            (
+                serde_json::json!({ "headers": [], "bodies": [] }),
+                "bodies are empty",
+            ),
+            (
+                serde_json::json!({ "headers": ["M4"], "bodies": ["皿8"], "connector": "tab" }),
+                "connector must be newline, space or none, got tab",
+            ),
+            (
+                serde_json::json!({ "headers": ["M4"], "bodies": ["皿8"], "offset_percent": 50 }),
+                "offset_percent must be 0..=49",
+            ),
+            (
+                serde_json::json!({ "headers": ["M4"], "bodies": ["皿8"], "font": "Comic" }),
+                "unknown font: Comic",
+            ),
+        ] {
+            let response = app(printer.clone(), catalog())
+                .oneshot(continuous_request(&payload))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{payload}");
+            assert!(body_string(response).await.contains(expected), "{payload}");
+        }
+        assert!(printer.jobs.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failing_printer_makes_the_continuous_endpoint_answer_502() {
+        let printer = Arc::new(FakePrinter {
+            jobs: Mutex::default(),
+            failure: Some("no PT-P700 found on USB".to_owned()),
+        });
+
+        let response = app(printer, catalog())
+            .oneshot(continuous_request(&serde_json::json!({
+                "headers": ["M4"], "bodies": ["皿8"]
+            })))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert!(body_string(response).await.contains("no PT-P700"));
+    }
+
     #[tokio::test]
     async fn fonts_endpoint_lists_the_catalog_with_its_default() {
         let response = app(Arc::new(FakePrinter::default()), catalog())
@@ -688,7 +1003,7 @@ mod tests {
         let expected = super::render_job(
             &catalog(),
             &PrintJob {
-                lines: vec!["Gridfinity".to_owned()],
+                labels: vec![vec!["Gridfinity".to_owned()]],
                 offset_percent: 5,
                 font: None,
                 font_scale_percent: 100,
@@ -697,6 +1012,7 @@ mod tests {
             76,
         )
         .unwrap();
+        let expected = &expected[0];
         assert_eq!(body["width_px"], expected.width);
         assert_eq!(body["height_px"], 68);
         assert_eq!(body["tape_px"], 76);

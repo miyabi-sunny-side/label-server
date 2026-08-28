@@ -8,6 +8,19 @@ export interface PrintOptions {
   align: Align;
 }
 
+export type Connector = "newline" | "space" | "none";
+
+/** One job of several labels; every label shares the settings. */
+export interface ContinuousOptions {
+  headers: string[];
+  bodies: string[];
+  connector: Connector;
+  offset_percent: number;
+  font: string | null;
+  font_scale_percent: number;
+  align: Align;
+}
+
 export interface PrintResult {
   output: string;
 }
@@ -52,6 +65,20 @@ function body(options: PrintOptions) {
 
 export function postPrint(options: PrintOptions): Promise<PrintResult> {
   return postJson("/api/print", body(options));
+}
+
+export function postContinuousPrint(
+  options: ContinuousOptions,
+): Promise<PrintResult> {
+  return postJson("/api/print/continuous", {
+    headers: options.headers,
+    bodies: options.bodies,
+    connector: options.connector,
+    offset_percent: options.offset_percent,
+    font: options.font ?? undefined,
+    font_scale_percent: options.font_scale_percent,
+    align: options.align,
+  });
 }
 
 export function postPreview(

@@ -1,7 +1,7 @@
 <script lang="ts">
+  import Settings from "../lib/Settings.svelte";
   import {
     PrintError,
-    fetchFonts,
     postPreview,
     postPrint,
     type Align,
@@ -20,7 +20,6 @@
   let offsetPercent = $state(5);
   let fontScalePercent = $state(100);
   let font = $state<string | null>(null);
-  let fonts = $state<string[]>([]);
   let align = $state<Align>("left");
 
   let printState = $state<PrintState>("idle");
@@ -36,17 +35,6 @@
     font,
     font_scale_percent: fontScalePercent,
     align,
-  });
-
-  $effect(() => {
-    void fetchFonts()
-      .then((catalog) => {
-        fonts = catalog.fonts;
-        font = catalog.default;
-      })
-      .catch(() => {
-        // Without the catalog the server default font still applies.
-      });
   });
 
   // Re-render the preview a moment after the last change. Only the newest
@@ -116,54 +104,13 @@
       disabled={printState === "printing"}></textarea>
   </label>
 
-  <div class="settings">
-    <label class="field">
-      <span class="caption">フォント</span>
-      <select
-        class="input"
-        bind:value={font}
-        disabled={printState === "printing"}
-      >
-        {#each fonts as id (id)}
-          <option value={id}>{id}</option>
-        {/each}
-      </select>
-    </label>
-    <label class="field">
-      <span class="caption">揃え</span>
-      <select
-        class="input"
-        bind:value={align}
-        disabled={printState === "printing"}
-      >
-        <option value="left">左寄せ</option>
-        <option value="center">中央寄せ</option>
-        <option value="right">右寄せ</option>
-      </select>
-    </label>
-    <label class="field">
-      <span class="caption">オフセット (%)</span>
-      <input
-        class="input"
-        type="number"
-        min="0"
-        max="49"
-        bind:value={offsetPercent}
-        disabled={printState === "printing"}
-      />
-    </label>
-    <label class="field">
-      <span class="caption">文字サイズ (%)</span>
-      <input
-        class="input"
-        type="number"
-        min="10"
-        max="100"
-        bind:value={fontScalePercent}
-        disabled={printState === "printing"}
-      />
-    </label>
-  </div>
+  <Settings
+    bind:font
+    bind:align
+    bind:offsetPercent
+    bind:fontScalePercent
+    disabled={printState === "printing"}
+  />
 
   <div class="preview" data-preview={previewState}>
     <span class="caption">プレビュー ({TAPE_MM}mm テープ想定)</span>
@@ -223,18 +170,6 @@
     flex-direction: column
     gap: var(--sp-1)
     min-width: 0
-
-  .settings
-    display: grid
-    grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr))
-    gap: var(--sp-3)
-
-  @media (max-width: 767px)
-    .settings
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr)
-
-      .field:first-child
-        grid-column: 1 / -1
 
   .caption
     font-size: var(--fs-xs)
