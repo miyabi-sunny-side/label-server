@@ -35,6 +35,11 @@ pub const PACKBITS_ENABLE: [u8; 2] = [0x4d, 0x02];
 pub const RASTER_MODE: [u8; 4] = [0x1b, 0x69, 0x61, 0x01];
 /// `ESC i M 40` — cut the blank leader before printing.
 pub const PRECUT: [u8; 4] = [0x1b, 0x69, 0x4d, 0x40];
+/// `ESC i d 23 00` — feed 35 dots before and after the label. The P700
+/// prints at 180dpi, so 35 dots is 35 * 25.4 / 180 = 4.94mm, the nearest
+/// dot to the 5mm that leaves enough tape to cut comfortably. This is on
+/// top of the ~24.3mm leader the cutter position forces.
+pub const MARGIN: [u8; 5] = [0x1b, 0x69, 0x64, 0x23, 0x00];
 /// Print with feeding (eject / cut).
 pub const EJECT: [u8; 1] = [0x1a];
 
@@ -213,6 +218,7 @@ where
     if precut {
         transport.write(&PRECUT)?;
     }
+    transport.write(&MARGIN)?;
     let offset = (MAX_PX - bitmap.height) / 2;
     for column in 0..bitmap.width {
         transport.write(&raster_packet(&bitmap, column, offset))?;
@@ -387,13 +393,16 @@ mod tests {
         assert_eq!(writes[2], [0x4d, 0x02]);
         assert_eq!(writes[3], [0x1b, 0x69, 0x61, 0x01]);
         assert_eq!(writes[4], [0x1b, 0x69, 0x4d, 0x40]);
+        // ESC i d 23 00: 0x23 = 35 dots of feed before and after the label,
+        // which is 35 * 25.4 / 180 = 4.94mm at the P700's 180dpi.
+        assert_eq!(writes[5], [0x1b, 0x69, 0x64, 0x23, 0x00]);
         // Golden raster packets from the ptouch-print protocol: 'G', 17, 0, 15
         // then 16 bytes. A 4px image sits at bits 62..=65 of the 128px head;
         // rows go out bottom-up and rasterline_setpixel stores pixel p at
         // byte (15 - p / 8), bit (p % 8): the bottom row is bit 62
         // (byte 8, 0x40) and the top row is bit 65 (byte 7, 0x02).
         assert_eq!(
-            writes[5],
+            writes[6],
             [
                 0x47, 0x11, 0x00, 0x0f, //
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
@@ -401,15 +410,15 @@ mod tests {
             ]
         );
         assert_eq!(
-            writes[6],
+            writes[7],
             [
                 0x47, 0x11, 0x00, 0x0f, //
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, //
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             ]
         );
-        assert_eq!(writes[7], [0x1a]);
-        assert_eq!(writes.len(), 8);
+        assert_eq!(writes[8], [0x1a]);
+        assert_eq!(writes.len(), 9);
         assert!(writes.iter().all(|packet| packet.len() <= 128));
     }
 
