@@ -64,9 +64,16 @@ verifying the checksum, clear the quarantine flag once so Gatekeeper lets it run
 `xattr -d com.apple.quarantine label-server-macos-aarch64`. The macOS build is produced by the
 release workflow but has not yet been exercised against a printer on a Mac.
 
-Releases are cut by pushing a `v*.*.*` tag; the `Release` workflow builds both binaries natively,
-smoke-tests each from an empty directory, and attaches them. Running the workflow manually keeps
-the binaries as workflow artifacts without creating a release.
+Releases are cut by pushing a `v*.*.*` tag. The `Release` workflow runs the same checks as CI,
+checks that the tag matches the Cargo package version, builds both binaries natively, and verifies
+their checksums, version, health endpoints, embedded SPA and favicon from an empty directory
+before attaching them. Main and pull-request CI run checks without building a release binary.
+Running the release workflow manually performs the same validation and keeps the binaries as
+workflow artifacts without creating a release.
+
+The release profile keeps optimization level 3 and stripping, with LTO disabled and 16 codegen
+units to reduce build time. Small binary-size and runtime-memory increases are acceptable for
+this service; native Linux/macOS builds and packaged-binary smoke tests remain release checks.
 
 ## Quick start (from source)
 

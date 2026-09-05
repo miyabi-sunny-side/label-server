@@ -11,7 +11,11 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
   build:
+    needs: verify
     strategy:
       fail-fast: false
       matrix:
@@ -39,6 +43,20 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Check package and tag version
+        id: version
+        shell: bash
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --locked --format-version 1 | jq -r '.packages[] | select(.name == "label-server") | .version')"
+          if [[ "$REF_TYPE" == "tag" ]]; then
+            test "$REF_NAME" = "v$version"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       # The client is compiled into the binary, so it must be built first.
       - name: Build client
         run: |
@@ -59,9 +77,16 @@ jobs:
             sha256sum "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
           fi
           cat "${{ matrix.artifact }}.sha256"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            shasum -a 256 -c "${{ matrix.artifact }}.sha256"
+          else
+            sha256sum -c "${{ matrix.artifact }}.sha256"
+          fi
 
       - name: Smoke-test the packaged binary from an empty directory
         shell: bash
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           dir="$(mktemp -d)"
@@ -70,6 +95,7 @@ jobs:
           # and removes the directory on every exit path.
           trap 'if [[ -n "$server_pid" ]]; then kill -TERM "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi; rm -rf "$dir"' EXIT
           cp "${{ matrix.artifact }}" "$dir/label-server"
+          test "$(cd "$dir" && ./label-server --version)" = "label-server $EXPECTED_VERSION"
           (cd "$dir" && APP_BIND_ADDR=127.0.0.1:3000 exec ./label-server) &
           server_pid=$!
 
@@ -82,8 +108,18 @@ jobs:
             fi
             sleep 0.25
           done
+          test "$(curl --fail --silent http://127.0.0.1:3000/healthz)" = "ok"
+          test "$(curl --fail --silent http://127.0.0.1:3000/api/health)" = '{"status":"ok"}'
           curl --fail --silent http://127.0.0.1:3000/ | grep --ignore-case '<!doctype html'
+          curl --fail --silent http://127.0.0.1:3000/favicon.svg > "$dir/favicon.svg"
+          cmp client/dist/favicon.svg "$dir/favicon.svg"
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/api/missing)" = "404"
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/projects/example)" = "200"
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/api/fonts)" = "200"
+
+          kill -TERM "$server_pid"
+          wait "$server_pid"
+          server_pid=""
 
       - name: Keep workflow artifact
         if: github.event_name == 'workflow_dispatch'
