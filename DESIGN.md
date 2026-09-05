@@ -626,3 +626,9 @@ entry.
   the browser, not by eye.
 - Do design in Sumi first, then verify Kinari as a warm sibling — never
   as an inverted afterthought.
+
+## Favicon
+
+- Browser identity uses the standalone SVG asset `client/public/favicon.svg`; the Iconography dictionary owns icons rendered inside the application UI.
+- On a 32×32 viewBox, a tape-teal (`#3fc9b8`) horizontal label has a clipped end, a hole, and short text-like strokes against Sumi surface (`#191919`).
+- The same static mark serves both themes; its label silhouette, hole, and strokes remain distinct at 16×16 and 32×32 pixels.
