@@ -48,6 +48,7 @@
       type="number"
       min="10"
       max="100"
+      step="10"
       bind:value={fontScalePercent}
       {disabled}
     />
