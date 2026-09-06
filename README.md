@@ -179,9 +179,13 @@ the USB protocol against a recording `Transport`. The renderer tests use the emb
 
 | Variable              | Default          | Purpose                                                                   |
 | --------------------- | ---------------- | ------------------------------------------------------------------------- |
-| `APP_BIND_ADDR`       | `127.0.0.1:3000` | Socket address of the HTTP listener. Use `0.0.0.0:3000` to serve the LAN. |
+| `PORT`                | `3000`           | HTTP port (1–65535), listening on all IPv4 interfaces (`0.0.0.0`). |
 | `LABEL_FONT`          | unset            | TTF/OTF/TTC to load first; it becomes the default instead of BIZ UDPGothic. |
 | `RUST_LOG`            | `info`           | Logging filter, for example `label_server=debug,tower_http=debug`.        |
+
+`PORT` defaults only when unset. Empty, nonnumeric, or out-of-range values fail startup with an
+explicit error. Run `PORT=3010 label-server` to change the port. Deployment and ingress settings
+own the access boundary.
 
 ## Repository structure
 
