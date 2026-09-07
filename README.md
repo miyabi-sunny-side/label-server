@@ -175,17 +175,22 @@ The Rust tests never touch a printer: the HTTP layer is tested against a recordi
 the USB protocol against a recording `Transport`. The renderer tests use the embedded font.
 `npm run lint:design` checks the design contract in [`DESIGN.md`](DESIGN.md).
 
-## Configuration
+## Environment variables
 
-| Variable              | Default          | Purpose                                                                   |
-| --------------------- | ---------------- | ------------------------------------------------------------------------- |
-| `PORT`                | `3000`           | HTTP port (1–65535), listening on all IPv4 interfaces (`0.0.0.0`). |
-| `LABEL_FONT`          | unset            | TTF/OTF/TTC to load first; it becomes the default instead of BIZ UDPGothic. |
-| `RUST_LOG`            | `info`           | Logging filter, for example `label_server=debug,tower_http=debug`.        |
+All settings are optional and are read when the server starts.
 
-`PORT` defaults only when unset. Empty, nonnumeric, or out-of-range values fail startup with an
-explicit error. Run `PORT=3010 label-server` to change the port. Deployment and ingress settings
-own the access boundary.
+| Variable | Default when unset | Purpose / invalid values |
+| --- | --- | --- |
+| `PORT` | `3000` | HTTP port on all IPv4 interfaces (`0.0.0.0`). Only decimal digits representing `1`–`65535` are accepted; empty, non-Unicode, signed, whitespace-padded or out-of-range values fail startup. |
+| `LABEL_FONT` | Unset; embedded BIZ UDPGothic is the default | Path to a TTF/OTF/TTC loaded first (relative paths use the working directory; collection face 0 is used). Empty, unreadable or invalid font files are skipped, leaving the embedded font as the default. |
+| `RUST_LOG` | `info` | A tracing filter, e.g. `label_server=debug,tower_http=debug`. Non-Unicode values or invalid filter syntax fall back to `info`; an empty string is a valid empty filter and disables logs. |
+
+Run `PORT=3010 label-server` to change the port. The former `APP_BIND_ADDR` is
+ignored; configure its port through `PORT`. Deployment and ingress settings own
+the access boundary. This service still uses `RUST_LOG`; it does not read `LOG_LEVEL`.
+
+The setting readers are in [`src/main.rs`](src/main.rs); font fallback is in
+[`FontCatalog::load`](src/lib.rs). Build-time Cargo/CI variables are not runtime settings.
 
 ## Repository structure
 
