@@ -191,19 +191,18 @@ pub fn query_status<T: Transport>(transport: &mut T) -> Result<Status, Error> {
 }
 
 /// One raster packet for a bitmap column, centred on the print head.
-fn raster_packet(bitmap: &Bitmap, column: usize, offset: usize) -> Vec<u8> {
-    let mut packet = vec![0x47, BYTES_PER_LINE_U8 + 1, 0x00, BYTES_PER_LINE_U8 - 1];
+fn raster_packet(bitmap: &Bitmap, column: usize, offset: usize) -> [u8; 4 + BYTES_PER_LINE] {
+    let mut packet = [0; 4 + BYTES_PER_LINE];
+    packet[..4].copy_from_slice(&[0x47, BYTES_PER_LINE_U8 + 1, 0x00, BYTES_PER_LINE_U8 - 1]);
     // Same placement as ptouch-print's rasterline_setpixel: the line is
     // filled from its last byte, least significant bit first. Filling from
     // the first byte instead flips the label across the tape.
-    let mut line = [0u8; BYTES_PER_LINE];
     for row in 0..bitmap.height {
         if bitmap.get(column, bitmap.height - 1 - row) {
             let bit = offset + row;
-            line[BYTES_PER_LINE - 1 - bit / 8] |= 1 << (bit % 8);
+            packet[4 + BYTES_PER_LINE - 1 - bit / 8] |= 1 << (bit % 8);
         }
     }
-    packet.extend_from_slice(&line);
     packet
 }
 

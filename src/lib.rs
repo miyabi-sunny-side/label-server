@@ -436,23 +436,15 @@ fn bounded(value: Option<i64>, default: u8, min: u8, max: u8, name: &str) -> Res
         .ok_or_else(|| format!("{name} must be {min}..={max}, got {value}"))
 }
 
-/// The validated options both modes accept.
-#[derive(Clone, Copy)]
-struct Options {
-    offset_percent: u8,
-    font_scale_percent: u8,
-    margin_mm: u8,
-    align: render::Align,
-}
-
-/// The options both modes accept, validated once. Returns the 400
-/// message when one is out of range.
-fn options_from(
+/// Validates the shared options and assembles a job, or the 400 message.
+fn job_with(
+    labels: Vec<Vec<String>>,
+    font: Option<String>,
     offset_percent: Option<i64>,
     font_scale_percent: Option<i64>,
     margin_mm: Option<i64>,
     align: Option<&str>,
-) -> Result<Options, String> {
+) -> Result<PrintJob, String> {
     let offset_percent = bounded(
         offset_percent,
         DEFAULT_OFFSET_PERCENT,
@@ -479,10 +471,12 @@ fn options_from(
         Some(value) => render::Align::parse(value)
             .ok_or_else(|| format!("align must be left, center or right, got {value}"))?,
     };
-    Ok(Options {
+    Ok(PrintJob {
+        labels,
         offset_percent,
-        font_scale_percent,
         margin_mm,
+        font,
+        font_scale_percent,
         align,
     })
 }
@@ -490,25 +484,14 @@ fn options_from(
 /// Turns a request into a job, or the 400 message.
 fn job_from(request: &PrintRequest) -> Result<PrintJob, String> {
     let lines = label_lines(&request.text).ok_or_else(|| "text is empty".to_owned())?;
-    let options = options_from(
+    job_with(
+        vec![lines],
+        request.font.clone(),
         request.offset_percent,
         request.font_scale_percent,
         request.margin_mm,
         request.align.as_deref(),
-    )?;
-    Ok(job_with(vec![lines], request.font.clone(), options))
-}
-
-/// Assembles a job from its labels and the options both modes share.
-fn job_with(labels: Vec<Vec<String>>, font: Option<String>, options: Options) -> PrintJob {
-    PrintJob {
-        labels,
-        offset_percent: options.offset_percent,
-        margin_mm: options.margin_mm,
-        font,
-        font_scale_percent: options.font_scale_percent,
-        align: options.align,
-    }
+    )
 }
 
 /// Turns a continuous request into a job of several labels, or the 400
@@ -537,13 +520,14 @@ fn continuous_job_from(request: &ContinuousRequest) -> Result<PrintJob, String> 
     if labels.is_empty() {
         return Err("bodies are empty".to_owned());
     }
-    let options = options_from(
+    job_with(
+        labels,
+        request.font.clone(),
         request.offset_percent,
         request.font_scale_percent,
         request.margin_mm,
         request.align.as_deref(),
-    )?;
-    Ok(job_with(labels, request.font.clone(), options))
+    )
 }
 
 async fn api_preview(State(state): State<AppState>, Json(request): Json<PrintRequest>) -> Response {
