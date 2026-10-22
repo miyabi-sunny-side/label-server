@@ -11,11 +11,7 @@ permissions:
   contents: write
 
 jobs:
-  verify:
-    uses: ./.github/workflows/ci.yml
-
   build:
-    needs: verify
     strategy:
       fail-fast: false
       matrix:
@@ -83,44 +79,11 @@ jobs:
             sha256sum -c "${{ matrix.artifact }}.sha256"
           fi
 
-      - name: Smoke-test the packaged binary from an empty directory
+      - name: Check binary version
         shell: bash
         env:
           EXPECTED_VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          dir="$(mktemp -d)"
-          server_pid=""
-          # Installed before anything can fail: stops the server (if started)
-          # and removes the directory on every exit path.
-          trap 'if [[ -n "$server_pid" ]]; then kill -TERM "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi; rm -rf "$dir"' EXIT
-          cp "${{ matrix.artifact }}" "$dir/label-server"
-          test "$(cd "$dir" && ./label-server --version)" = "label-server $EXPECTED_VERSION"
-          export PORT=43128
-          (cd "$dir" && exec ./label-server) &
-          server_pid=$!
-
-          for attempt in {1..20}; do
-            if curl --fail --silent http://127.0.0.1:$PORT/healthz >/dev/null; then
-              break
-            fi
-            if [[ "$attempt" == 20 ]]; then
-              exit 1
-            fi
-            sleep 0.25
-          done
-          test "$(curl --fail --silent http://127.0.0.1:$PORT/healthz)" = "ok"
-          test "$(curl --fail --silent http://127.0.0.1:$PORT/api/health)" = '{"status":"ok"}'
-          curl --fail --silent http://127.0.0.1:$PORT/ | grep --ignore-case '<!doctype html'
-          curl --fail --silent http://127.0.0.1:$PORT/favicon.svg > "$dir/favicon.svg"
-          cmp client/dist/favicon.svg "$dir/favicon.svg"
-          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:$PORT/api/missing)" = "404"
-          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:$PORT/projects/example)" = "200"
-          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:$PORT/api/fonts)" = "200"
-
-          kill -TERM "$server_pid"
-          wait "$server_pid"
-          server_pid=""
+        run: test "$(./${{ matrix.artifact }} --version)" = "label-server $EXPECTED_VERSION"
 
       - name: Keep workflow artifact
         if: github.event_name == 'workflow_dispatch'

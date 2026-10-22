@@ -64,16 +64,15 @@ verifying the checksum, clear the quarantine flag once so Gatekeeper lets it run
 `xattr -d com.apple.quarantine label-server-macos-aarch64`. The macOS build is produced by the
 release workflow but has not yet been exercised against a printer on a Mac.
 
-Releases are cut by pushing a `v*.*.*` tag. The `Release` workflow runs the same checks as CI,
-checks that the tag matches the Cargo package version, builds both binaries natively, and verifies
-their checksums, version, health endpoints, embedded SPA and favicon from an empty directory
-before attaching them. Main and pull-request CI run checks without building a release binary.
-Running the release workflow manually performs the same validation and keeps the binaries as
-workflow artifacts without creating a release.
+Releases are cut by pushing a `v*.*.*` tag. The `Release` workflow checks that the tag matches the
+Cargo package version, builds both binaries natively, and verifies their checksums and `--version`
+before attaching them. It runs no formatter, linter or tests: run [Verify changes](#verify-changes)
+locally before committing. Running the release workflow manually builds the same binaries and keeps
+them as workflow artifacts without creating a release.
 
 The release profile keeps optimization level 3 and stripping, with LTO disabled and 16 codegen
 units to reduce build time. Small binary-size and runtime-memory increases are acceptable for
-this service; native Linux/macOS builds and packaged-binary smoke tests remain release checks.
+this service.
 
 ## Quick start (from source)
 
@@ -196,7 +195,7 @@ The setting readers are in [`src/main.rs`](src/main.rs); font fallback is in
 
 ```text
 .
-├── .github/workflows/  # Continuous integration and the tag-driven release
+├── .github/workflows/  # The tag-driven release
 ├── client/             # Svelte 5 page, Vite config, tests, and the npm lockfile
 ├── src/                # Axum router, PT-P700 protocol (ptouch.rs), text renderer (render.rs)
 ├── fonts/              # BIZ UDPGothic (OFL) embedded into the binary
